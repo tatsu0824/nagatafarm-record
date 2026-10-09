@@ -1,0 +1,144 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-size: 18px;
+  line-height: 1.5;
+  color: #1f2a1f;
+  background: #f6f7f2;
+}
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 12px 12px 0;
+}
+
+.title {
+  font-size: 20px;
+  margin: 4px 0 8px;
+}
+
+.message,
+.result,
+.status,
+.selection,
+.note,
+.name {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  margin: 8px 0;
+}
+
+.message,
+.result {
+  font-size: 20px;
+}
+
+.note {
+  font-size: 16px;
+  color: #4a524a;
+}
+
+.status.error {
+  color: #a32020;
+  font-weight: bold;
+}
+
+.heading {
+  font-size: 20px;
+  margin: 16px 0 4px;
+}
+
+.group-label {
+  font-size: 18px;
+  margin: 10px 0 4px;
+  color: #3c5a3c;
+}
+
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+button {
+  min-height: 48px;
+  font-size: 18px;
+  font-family: inherit;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.choice {
+  min-width: 72px;
+  padding: 6px 14px;
+  background: #ffffff;
+  color: #1f2a1f;
+  border: 1px solid #8a948a;
+}
+
+.choice.selected {
+  background: #2e7d32;
+  color: #ffffff;
+  border: 4px solid #1b4d1e;
+  padding: 3px 11px;
+  font-weight: bold;
+}
+
+.actions {
+  position: sticky;
+  bottom: 0;
+  margin: 16px -12px 0;
+  padding: 8px 12px 12px;
+  background: #f6f7f2;
+  border-top: 1px solid #c9cfc4;
+}
+
+.action-row {
+  display: flex;
+  gap: 8px;
+}
+
+.action-row button {
+  flex: 1 1 0;
+  padding: 8px 12px;
+}
+
+.reset,
+.again,
+.close {
+  background: #ffffff;
+  color: #1f2a1f;
+  border: 1px solid #8a948a;
+}
+
+.send {
+  flex: 2 1 0;
+  background: #e65100;
+  color: #ffffff;
+  border: 2px solid #b33f00;
+  font-weight: bold;
+  font-size: 20px;
+}
+
+.result-actions {
+  margin: 16px 0;
+}
