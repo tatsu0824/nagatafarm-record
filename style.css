@@ -15,7 +15,7 @@ body {
   font-size: 18px;
   line-height: 1.5;
   color: #1f2a1f;
-  background: #f6f7f2;
+  background: #e9ede4;
 }
 
 main {
@@ -108,7 +108,7 @@ button:disabled {
   bottom: 0;
   margin: 16px -12px 0;
   padding: 8px 12px 12px;
-  background: #f6f7f2;
+  background: #e9ede4;
   border-top: 1px solid #c9cfc4;
 }
 
@@ -132,13 +132,53 @@ button:disabled {
 
 .send {
   flex: 2 1 0;
-  background: #e65100;
+  background: #c43e00;
   color: #ffffff;
-  border: 2px solid #b33f00;
+  border: 2px solid #8f2d00;
   font-weight: bold;
   font-size: 20px;
 }
 
 .result-actions {
   margin: 16px 0;
+}
+
+.card {
+  background: #ffffff;
+  border: 1px solid #7a847a;
+  border-radius: 10px;
+  padding: 12px;
+  margin: 12px 0;
+}
+
+.card > :first-child {
+  margin-top: 0;
+}
+
+.card > :last-child {
+  margin-bottom: 0;
+}
+
+.card > .heading:first-child {
+  margin: -12px -12px 8px;
+  padding: 8px 12px;
+  background: #dfe8d8;
+  border-bottom: 1px solid #7a847a;
+  border-radius: 9px 9px 0 0;
+}
+
+.details-toggle {
+  width: 100%;
+}
+
+.previous {
+  margin-top: 8px;
+  border-top: 1px dashed #7a847a;
+}
+
+.result {
+  background: #ffffff;
+  border: 1px solid #7a847a;
+  border-radius: 10px;
+  padding: 12px;
 }

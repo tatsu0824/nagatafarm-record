@@ -69,8 +69,9 @@ var STATE_LINE_PREFIX = '除草前の状態：';
 
 /** 除草前の状態の画面の文。 */
 var RECORD_APP_STATE_TEXT = {
-  heading: '除草前の状態（任意）',
-  note: 'あてはまるものをいくつでも選べます。選ばなくても送信できます',
+  heading: '除草前の状態（必須）',
+  note: 'あてはまるものを1つ以上選んでください（いくつでも選べます）',
+  missing: '（除草前の状態を選んでください）',
   notRecorded: '除草前の状態を記録できていない可能性があります（管理者に連絡してください）'
 };
 
@@ -105,15 +106,12 @@ var RECORD_APP_DETAIL_TEXT = {
   progressNote: '入れたいときだけ「進み具合を入れる」を押し、バーを動かして、この記録でどのくらい終わったかの感じを記録します。全部終わったときは入れなくてかまいません',
   partItem: '部位',
   progressItem: '進み具合',
-  stateItem: '除草前の状態',
   detailsOpenHead: '詳しく（',
   detailsOpenTail: '）',
   detailsClose: '詳しくを閉じる',
   summaryPrefix: '詳しく：',
   summaryJoiner: '／',
   itemJoiner: '・',
-  stateCountHead: '除草前の状態 ',
-  stateCountTail: 'つ',
   moreHead: 'ほか ',
   moreTail: ' か所',
   notRecorded: '部位・薬剤・進み具合を記録できていない可能性があります（管理者に連絡してください）'
@@ -474,7 +472,8 @@ function recordAppStart_() {
     var locs = orderedSelection(state.groups, state.selected);
     return T.selectedPrefix + (locs.length ? locs.join('・') : T.noLocation) + '／' +
       (state.range.length ? state.range.join('・') : T.rangeWhole) + '／' +
-      (state.method !== '' ? state.method : T.noMethod);
+      (state.method !== '' ? state.method : T.noMethod) +
+      (state.stateOptions.length >= 1 && state.states.length === 0 ? '／' + TS.missing : '');
   }
 
   function choiceButton(text, isSelected, onClick) {
@@ -494,9 +493,10 @@ function recordAppStart_() {
     return state.drugMethod !== '' && state.drugs.length >= 1 && state.method === state.drugMethod;
   }
 
-  /** 送信できるか（既存の条件＋薬剤・倍率の欄が出ているときは薬剤と正しい倍率）。 */
+  /** 送信できるか（既存の条件＋状態の選択肢があれば1つ以上＋薬剤・倍率の欄が出ているときは薬剤と正しい倍率）。 */
   function ready() {
     if (!canSend(state.selected, state.method)) return false;
+    if (state.stateOptions.length >= 1 && state.states.length === 0) return false;
     return !drugShown() || (state.drug !== '' && parseRatio(state.ratioText) !== null);
   }
 
@@ -513,8 +513,8 @@ function recordAppStart_() {
     state.error = '';
   }
 
-  function renderRange() {
-    root.appendChild(el('h2', 'heading', T.rangeHeading));
+  function renderRange(card) {
+    card.appendChild(el('h2', 'heading', T.rangeHeading));
     var ranges = el('div', 'choices');
     [T.rangeWhole].concat(RANGE_DIRECTIONS).forEach(function (dir) {
       var isSelected = dir === T.rangeWhole ? state.range.length === 0 : state.range.indexOf(dir) >= 0;
@@ -525,12 +525,12 @@ function recordAppStart_() {
         renderSelect();
       }));
     });
-    root.appendChild(ranges);
-    root.appendChild(el('p', 'note', T.rangeNote));
+    card.appendChild(ranges);
+    card.appendChild(el('p', 'note', T.rangeNote));
   }
 
-  function renderStates() {
-    root.appendChild(el('h2', 'heading', TS.heading));
+  function renderStates(card) {
+    card.appendChild(el('h2', 'heading', TS.heading));
     var states = el('div', 'choices state-choices');
     state.stateOptions.forEach(function (s) {
       states.appendChild(choiceButton(s, state.states.indexOf(s) >= 0, function () {
@@ -540,8 +540,8 @@ function recordAppStart_() {
         renderSelect();
       }));
     });
-    root.appendChild(states);
-    root.appendChild(el('p', 'note', TS.note));
+    card.appendChild(states);
+    card.appendChild(el('p', 'note', TS.note));
   }
 
   /** 倍率のエラーの行を、入力が空でなく読めないときだけ出す（その場で更新）。 */
@@ -550,8 +550,8 @@ function recordAppStart_() {
     if (state.ratioText !== '' && parseRatio(state.ratioText) === null) area.appendChild(el('p', 'status error', TD.ratioError));
   }
 
-  function renderDrug() {
-    root.appendChild(el('h2', 'heading', TD.drugHeading));
+  function renderDrug(card) {
+    card.appendChild(el('h2', 'heading', TD.drugHeading));
     var drugs = el('div', 'choices drug-choices');
     state.drugs.forEach(function (d) {
       drugs.appendChild(choiceButton(d, state.drug === d, function () {
@@ -561,8 +561,8 @@ function recordAppStart_() {
         renderSelect();
       }));
     });
-    root.appendChild(drugs);
-    root.appendChild(el('h2', 'heading', TD.ratioHeading));
+    card.appendChild(drugs);
+    card.appendChild(el('h2', 'heading', TD.ratioHeading));
     var input = el('input', 'ratio');
     input.type = 'text';
     input.inputMode = 'numeric';
@@ -583,14 +583,14 @@ function recordAppStart_() {
       updateRatioError(errorArea);
       if (sendButton !== null) sendButton.disabled = state.sending || !ready();
     });
-    root.appendChild(input);
-    root.appendChild(el('p', 'note', TD.ratioNoteHead + state.drugMethod + TD.ratioNoteTail));
-    root.appendChild(errorArea);
+    card.appendChild(input);
+    card.appendChild(el('p', 'note', TD.ratioNoteHead + state.drugMethod + TD.ratioNoteTail));
+    card.appendChild(errorArea);
     updateRatioError(errorArea);
   }
 
-  function renderPart() {
-    root.appendChild(el('h2', 'heading', TD.partHeading));
+  function renderPart(card) {
+    card.appendChild(el('h2', 'heading', TD.partHeading));
     var parts = el('div', 'choices part-choices');
     state.parts.forEach(function (p) {
       parts.appendChild(choiceButton(p, state.part === p, function () {
@@ -600,15 +600,15 @@ function recordAppStart_() {
         renderSelect();
       }));
     });
-    root.appendChild(parts);
-    root.appendChild(el('p', 'note', TD.partNote));
+    card.appendChild(parts);
+    card.appendChild(el('p', 'note', TD.partNote));
   }
 
-  function renderProgress() {
+  function renderProgress(card) {
     var spec = state.progressSpec;
-    root.appendChild(el('h2', 'heading', TD.progressHeading));
+    card.appendChild(el('h2', 'heading', TD.progressHeading));
     var label = el('p', 'progress-value', progressLabel(state.progress));
-    root.appendChild(label);
+    card.appendChild(label);
     if (!state.progressOpen) {
       // スライダーは押したときだけ出す（縦のスワイプで値が入るのを防ぐ）。押しただけでは値を入れない
       var open = button(TD.progressOpen, 'again progress-open', function () {
@@ -617,8 +617,8 @@ function recordAppStart_() {
         renderSelect();
       });
       open.disabled = state.sending;
-      root.appendChild(open);
-      root.appendChild(el('p', 'note', TD.progressNote));
+      card.appendChild(open);
+      card.appendChild(el('p', 'note', TD.progressNote));
       return;
     }
     var slider = el('input', 'progress-bar');
@@ -647,9 +647,9 @@ function recordAppStart_() {
       label.textContent = progressLabel(v);
       slider.setAttribute('aria-valuetext', v + PROGRESS_SUFFIX);
     });
-    root.appendChild(slider);
-    root.appendChild(clearButton);
-    root.appendChild(el('p', 'note', TD.progressNote));
+    card.appendChild(slider);
+    card.appendChild(clearButton);
+    card.appendChild(el('p', 'note', TD.progressNote));
   }
 
   /** 閉じているときの「詳しく：…」の要約（選んだものがなければ空文字）。 */
@@ -658,16 +658,14 @@ function recordAppStart_() {
     if (state.part !== '') items.push(state.part);
     if (state.range.length >= 1) items.push(state.range.join(TD.itemJoiner));
     if (state.progress !== null) items.push(state.progress + PROGRESS_SUFFIX);
-    if (state.states.length >= 1) items.push(TD.stateCountHead + state.states.length + TD.stateCountTail);
     return items.length ? TD.summaryPrefix + items.join(TD.summaryJoiner) : '';
   }
 
-  function renderDetails() {
+  function renderDetails(card) {
     var items = [];
     if (state.parts.length >= 1) items.push(TD.partItem);
     items.push(T.rangeHeading);
     if (state.progressSpec !== null) items.push(TD.progressItem);
-    if (state.stateOptions.length >= 1) items.push(TD.stateItem);
     var toggle = button(state.detailsOpen ? TD.detailsClose : TD.detailsOpenHead + items.join(TD.itemJoiner) + TD.detailsOpenTail,
       'again details-toggle', function () {
         if (state.sending) return;
@@ -676,16 +674,15 @@ function recordAppStart_() {
       });
     toggle.setAttribute('aria-expanded', state.detailsOpen ? 'true' : 'false');
     toggle.disabled = state.sending;
-    root.appendChild(toggle);
+    card.appendChild(toggle);
     if (!state.detailsOpen) {
       var summary = detailsSummary();
-      if (summary !== '') root.appendChild(el('p', 'note', summary));
+      if (summary !== '') card.appendChild(el('p', 'note', summary));
       return;
     }
-    if (state.parts.length >= 1) renderPart();
-    renderRange();
-    if (state.progressSpec !== null) renderProgress();
-    if (state.stateOptions.length >= 1) renderStates();
+    if (state.parts.length >= 1) renderPart(card);
+    renderRange(card);
+    if (state.progressSpec !== null) renderProgress(card);
   }
 
   function renderSelect() {
@@ -694,10 +691,12 @@ function recordAppStart_() {
     var details = hasDetails();
     root.appendChild(el('p', 'name', state.name + T.nameSuffix));
 
-    root.appendChild(el('h2', 'heading', T.locationsHeading));
+    var placeCard = el('div', 'card card-place');
+    root.appendChild(placeCard);
+    placeCard.appendChild(el('h2', 'heading', T.locationsHeading));
     state.groups.forEach(function (g) {
       if (g.locations.length === 0) return;
-      root.appendChild(el('h3', 'group-label', g.label));
+      placeCard.appendChild(el('h3', 'group-label', g.label));
       var box = el('div', 'choices');
       g.locations.forEach(function (loc) {
         box.appendChild(choiceButton(loc, state.selected.indexOf(loc) >= 0, function () {
@@ -707,20 +706,22 @@ function recordAppStart_() {
           renderSelect();
         }));
       });
-      root.appendChild(box);
+      placeCard.appendChild(box);
     });
 
-    if (!details) renderRange();
+    if (!details) renderRange(placeCard);
 
     if (state.previous !== null && state.selected.length >= 1) {
       var prev = el('div', 'previous');
       previousLines(state.previous, orderedSelection(state.groups, state.selected)).forEach(function (line) {
         prev.appendChild(el('p', 'note', line));
       });
-      root.appendChild(prev);
+      placeCard.appendChild(prev);
     }
 
-    root.appendChild(el('h2', 'heading', T.methodsHeading));
+    var methodCard = el('div', 'card card-method');
+    root.appendChild(methodCard);
+    methodCard.appendChild(el('h2', 'heading', T.methodsHeading));
     var methods = el('div', 'choices');
     state.methods.forEach(function (m) {
       methods.appendChild(choiceButton(m, state.method === m, function () {
@@ -734,12 +735,21 @@ function recordAppStart_() {
         renderSelect();
       }));
     });
-    root.appendChild(methods);
+    methodCard.appendChild(methods);
 
-    if (drugShown()) renderDrug();
+    if (drugShown()) renderDrug(methodCard);
 
-    if (details) renderDetails();
-    else if (state.stateOptions.length >= 1) renderStates();
+    if (state.stateOptions.length >= 1) {
+      var statesCard = el('div', 'card card-states');
+      root.appendChild(statesCard);
+      renderStates(statesCard);
+    }
+
+    if (details) {
+      var detailsCard = el('div', 'card card-details');
+      root.appendChild(detailsCard);
+      renderDetails(detailsCard);
+    }
 
     root.appendChild(el('p', 'note', T.noticeInfo));
 
