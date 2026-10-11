@@ -117,6 +117,27 @@ var RECORD_APP_DETAIL_TEXT = {
   notRecorded: '部位・薬剤・進み具合を記録できていない可能性があります（管理者に連絡してください）'
 };
 
+/** 除草の依頼をしたときグループへ送る文の先頭（Handler.js の HANDLER_REQUEST_NOTICE_PREFIX_ と同じ値）。 */
+var REQUEST_NOTICE_PREFIX = '【依頼】';
+
+/** 除草の依頼・依頼の取り消しの画面の文（T27 と同じ文は RECORD_APP_TEXT・RECORD_APP_CANCEL_TEXT を使う）。 */
+var RECORD_APP_REQUEST_TEXT = {
+  heading: '除草の依頼',
+  note: '選んだ場所を地図で赤（今すぐ！）にし、毎日の自動通知にも出します。手段・状態は選ばなくてかまいません。誰かがその場所を記録すると自動で解除されます',
+  open: '除草して！',
+  cancelOpen: '依頼を取り消す',
+  noticeInfo: 'グループのトークから開いたときだけ、グループに【依頼】を送ります',
+  confirm: 'この場所の除草を依頼しますか？',
+  yes: '依頼する',
+  noticeTail: ' 除草して！',
+  noticeFailed: 'グループへの【依頼】の送信に失敗しました（依頼はできています）',
+  unknown: '依頼できたか分かりません。「依頼を取り消す」で一覧を開いて確かめてください',
+  listHeading: '取り消せる依頼',
+  listNote: '自分の依頼のうち、まだ解除されていないものだけ取り消せます',
+  empty: '取り消せる依頼はありません',
+  cancelConfirm: 'この依頼を取り消しますか？'
+};
+
 // ---- 純粋関数 ----
 
 /** config に LIFF ID と GAS の exec URL が正しい形で入っているとき true。 */
@@ -369,6 +390,47 @@ function recordAppIsCancelOk_(data) {
   return c !== null && typeof c === 'object' && typeof c.time === 'string' && typeof c.label === 'string';
 }
 
+/** 除草の依頼の要求（locations はコピー。引数は変えない）。 */
+function buildRequestBody(idToken, locations) {
+  return { action: 'request', idToken: idToken, locations: Array.isArray(locations) ? locations.slice() : [] };
+}
+
+/** REQUEST_OK の形か（result が ok、message が文字列、requested・already・rejected が文字列の配列）。 */
+function recordAppIsRequestOk_(data) {
+  if (data === null || typeof data !== 'object' || data.result !== 'ok' || typeof data.message !== 'string') return false;
+  return recordAppIsStringArray_(data.requested) && recordAppIsStringArray_(data.already) && recordAppIsStringArray_(data.rejected);
+}
+
+/** 依頼できた場所があるときグループへ送る文、それ以外は null。 */
+function buildRequestNoticeText(response) {
+  if (!recordAppIsRequestOk_(response) || response.requested.length === 0) return null;
+  return REQUEST_NOTICE_PREFIX + response.requested.join('・') + RECORD_APP_REQUEST_TEXT.noticeTail;
+}
+
+/** 自分の取り消せる依頼の一覧の要求。 */
+function buildRequestMineBody(idToken) {
+  return { action: 'requestMine', idToken: idToken };
+}
+
+/** 依頼の取り消しの要求。値は一覧の項目のまま（item は変えない。time・label は含めない）。 */
+function buildRequestCancelBody(idToken, item) {
+  return { action: 'requestCancel', idToken: idToken, row: item.row, receivedAt: item.receivedAt, locationCode: item.locationCode };
+}
+
+/** 依頼を取り消せたときグループへ送る文、それ以外は null。 */
+function buildRequestCancelNoticeText(response) {
+  if (!recordAppIsCancelOk_(response)) return null;
+  var c = response.cancelled;
+  if (c.label === '' || c.time === '') return null;
+  return CANCEL_NOTICE_PREFIX + c.label + '（' + c.time + '）';
+}
+
+/** 自分の取り消せる依頼の一覧の応答（REQUEST_MINE_OK）の形なら true（項目の形は MINE_OK と同じ）。 */
+function isRequestMineResponse(data) {
+  if (data === null || typeof data !== 'object') return false;
+  return isMineResponse({ result: data.result, records: data.requests });
+}
+
 // ---- 画面（ブラウザのときだけ動く） ----
 
 function recordAppIsStringArray_(a) {
@@ -391,6 +453,7 @@ function recordAppIsForm_(data) {
   if (data.parts !== undefined && !recordAppIsStringArray_(data.parts)) return false;
   if (data.progress !== undefined && !isProgressSpec(data.progress)) return false;
   if (data.previous !== undefined && !recordAppIsPreviousList_(data.previous)) return false;
+  if (data.request !== undefined && data.request !== true) return false;
   return true;
 }
 
@@ -417,7 +480,8 @@ function recordAppStart_() {
   var TS = RECORD_APP_STATE_TEXT;
   var TD = RECORD_APP_DETAIL_TEXT;
   var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
-    drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false };
+    drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false,
+    request: false, requesting: false, requestMine: [], requestCancelling: false };
   /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
   var sendButton = null;
 
@@ -751,6 +815,7 @@ function recordAppStart_() {
       renderDetails(detailsCard);
     }
 
+    if (state.request) renderRequestCard();
     root.appendChild(el('p', 'note', T.noticeInfo));
 
     var bar = el('div', 'actions');
@@ -1022,6 +1087,209 @@ function recordAppStart_() {
     });
   }
 
+  // ---- 除草の依頼 ----
+
+  /** 選ぶ画面の依頼のカード（FORM に request: true があるときだけ。最後のカードの直後に置く）。 */
+  function renderRequestCard() {
+    var TR = RECORD_APP_REQUEST_TEXT;
+    var card = el('div', 'card card-request');
+    root.appendChild(card);
+    card.appendChild(el('h2', 'heading', TR.heading));
+    card.appendChild(el('p', 'note', TR.note));
+    var row = el('div', 'action-row');
+    var open = button(TR.open, 'again request-open', function () {
+      if (state.sending || state.selected.length === 0) return;
+      renderRequestConfirm();
+    });
+    open.disabled = state.sending || state.selected.length === 0;
+    row.appendChild(open);
+    var cancelOpen = button(TR.cancelOpen, 'again request-cancel-open', function () {
+      if (state.sending) return;
+      openRequestList();
+    });
+    cancelOpen.disabled = state.sending;
+    row.appendChild(cancelOpen);
+    card.appendChild(row);
+    card.appendChild(el('p', 'note', TR.noticeInfo));
+  }
+
+  /** 依頼の確認の画面。「依頼する」で request を1回だけ送る。 */
+  function renderRequestConfirm() {
+    var TR = RECORD_APP_REQUEST_TEXT;
+    var locations = orderedSelection(state.groups, state.selected);
+    clear();
+    root.appendChild(el('p', 'message', TR.confirm));
+    root.appendChild(el('p', 'result', locations.join('・')));
+    root.appendChild(el('p', 'note', TR.noticeInfo));
+    var row = el('div', 'action-row');
+    var no = button(TC.no, 'reset request-no', function () {
+      if (state.requesting) return;
+      renderSelect();
+    });
+    var yes = button(TR.yes, 'send request-yes', function () {
+      if (state.requesting) return;
+      state.requesting = true;
+      no.disabled = true;
+      yes.disabled = true;
+      root.appendChild(el('p', 'status', T.sending));
+      post(buildRequestBody(state.idToken, locations)).then(function (r) {
+        state.requesting = false;
+        renderRequestResult(r);
+      }).catch(function () {
+        state.requesting = false;
+        renderRequestResult({ ok: false });
+      });
+    });
+    row.appendChild(no);
+    row.appendChild(yes);
+    root.appendChild(row);
+  }
+
+  function requestResultRow() {
+    var row = el('div', 'action-row result-actions');
+    row.appendChild(button(TC.back, 'reset request-back', backToRecord));
+    row.appendChild(button(T.close, 'close', function () {
+      liff.closeWindow();
+    }));
+    return row;
+  }
+
+  function renderRequestResult(r) {
+    var TR = RECORD_APP_REQUEST_TEXT;
+    clear();
+    if (r.ok && recordAppIsRequestOk_(r.data)) {
+      root.appendChild(el('p', 'result', r.data.message));
+      root.appendChild(el('p', 'note', TR.noticeInfo));
+      var noticeArea = el('div', 'notice-area');
+      root.appendChild(noticeArea);
+      root.appendChild(requestResultRow());
+      sendGroupText(buildRequestNoticeText(r.data), noticeArea, TR.noticeFailed);
+      return;
+    }
+    if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+      root.appendChild(el('p', 'result', r.data.message));
+    } else {
+      root.appendChild(el('p', 'status error', TR.unknown));
+    }
+    root.appendChild(requestResultRow());
+  }
+
+  /** text が null でなく、グループのトークから開いたときだけ sendMessages を1回（失敗は noticeArea に failedText）。 */
+  function sendGroupText(text, noticeArea, failedText) {
+    if (text === null) return;
+    var type;
+    try {
+      var context = liff.getContext();
+      type = context ? context.type : undefined;
+    } catch (e) {
+      type = undefined;
+    }
+    if (!shouldSendNotice(type)) return;
+    Promise.resolve().then(function () {
+      return liff.sendMessages([{ type: 'text', text: text }]);
+    }).catch(function () {
+      noticeArea.appendChild(el('p', 'status error', failedText));
+    });
+  }
+
+  function requestBackRow() {
+    var row = el('div', 'action-row');
+    row.appendChild(button(TC.back, 'reset request-back', backToRecord));
+    return row;
+  }
+
+  /** requestMine を送って取り消せる依頼の一覧を開く（押したときだけ）。 */
+  function openRequestList() {
+    showMessage(T.loading);
+    post(buildRequestMineBody(state.idToken)).then(function (r) {
+      if (r.ok && isRequestMineResponse(r.data)) {
+        state.requestMine = r.data.requests;
+        renderRequestList();
+        return;
+      }
+      showMessage(r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string' ? r.data.message : T.loadFailed);
+      root.appendChild(requestBackRow());
+    }).catch(function () {
+      showMessage(T.loadFailed);
+      root.appendChild(requestBackRow());
+    });
+  }
+
+  function renderRequestList() {
+    var TR = RECORD_APP_REQUEST_TEXT;
+    clear();
+    root.appendChild(el('h2', 'heading', TR.listHeading));
+    root.appendChild(el('p', 'note', TR.listNote));
+    root.appendChild(el('p', 'note', TC.noticeInfo));
+    if (state.requestMine.length === 0) root.appendChild(el('p', 'message', TR.empty));
+    state.requestMine.forEach(function (item) {
+      var box = el('div');
+      box.appendChild(el('p', 'result', itemText(item)));
+      box.appendChild(button(TC.pick, 'again request-cancel-pick', function () {
+        renderRequestCancelConfirm(item);
+      }));
+      root.appendChild(box);
+    });
+    root.appendChild(requestBackRow());
+  }
+
+  function renderRequestCancelConfirm(item) {
+    clear();
+    root.appendChild(el('p', 'message', RECORD_APP_REQUEST_TEXT.cancelConfirm));
+    root.appendChild(el('p', 'result', itemText(item)));
+    var row = el('div', 'action-row');
+    var no = button(TC.no, 'reset request-cancel-no', function () {
+      if (state.requestCancelling) return;
+      renderRequestList();
+    });
+    var yes = button(TC.yes, 'send request-cancel-yes', function () {
+      if (state.requestCancelling) return;
+      state.requestCancelling = true;
+      no.disabled = true;
+      yes.disabled = true;
+      root.appendChild(el('p', 'status', TC.cancelling));
+      post(buildRequestCancelBody(state.idToken, item)).then(function (r) {
+        state.requestCancelling = false;
+        renderRequestCancelResult(r);
+      }).catch(function () {
+        state.requestCancelling = false;
+        renderRequestCancelResult({ ok: false });
+      });
+    });
+    row.appendChild(no);
+    row.appendChild(yes);
+    root.appendChild(row);
+  }
+
+  function requestCancelResultRow() {
+    var row = el('div', 'action-row result-actions');
+    row.appendChild(button(TC.more, 'again request-cancel-more', openRequestList));
+    row.appendChild(button(TC.back, 'reset request-back', backToRecord));
+    row.appendChild(button(T.close, 'close', function () {
+      liff.closeWindow();
+    }));
+    return row;
+  }
+
+  function renderRequestCancelResult(r) {
+    clear();
+    if (r.ok && recordAppIsCancelOk_(r.data)) {
+      root.appendChild(el('p', 'result', r.data.message));
+      root.appendChild(el('p', 'note', TC.noticeInfo));
+      var noticeArea = el('div', 'notice-area');
+      root.appendChild(noticeArea);
+      root.appendChild(requestCancelResultRow());
+      sendGroupText(buildRequestCancelNoticeText(r.data), noticeArea, TC.noticeFailed);
+      return;
+    }
+    if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+      root.appendChild(el('p', 'result', r.data.message));
+    } else {
+      root.appendChild(el('p', 'status error', TC.unknown));
+    }
+    root.appendChild(requestCancelResultRow());
+  }
+
   function loadForm(preset) {
     post(buildRequest('form', state.idToken)).then(function (r) {
       if (!r.ok) {
@@ -1053,6 +1321,7 @@ function recordAppStart_() {
       state.parts = Array.isArray(data.parts) ? data.parts : [];
       state.progressSpec = data.progress !== undefined ? data.progress : null;
       state.previous = Array.isArray(data.previous) ? data.previous.slice() : null;
+      state.request = data.request === true;
       state.detailsOpen = false;
       state.drug = '';
       state.ratioText = '';
