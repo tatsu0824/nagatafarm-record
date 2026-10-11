@@ -1,7 +1,7 @@
 /*
  * 記録画面（LIFF）。場所を複数ボタンで選び、手段ボタンを1つ選んで送信する。
  * 場所・手段の一覧は毎回 GAS から受け取る（このファイルに農園の情報を書かない）。
- * 表示はすべて createElement と textContent で作る。キーボードを出す要素は作らない。
+ * 表示はすべて createElement と textContent で作る。キーボードを出す要素は倍率の入力欄だけ（進み具合はスライダー）。
  */
 
 /** グループへ送る文の先頭（Handler.js の無視の条件と同じ文字列）。 */
@@ -61,6 +61,64 @@ var RECORD_APP_CANCEL_TEXT = {
   more: '続けて取り消す'
 };
 
+/** 除草前の状態をつなぐ区切り（RecordForm.js の RECORD_FORM_STATE_JOINER_ と同じ値）。 */
+var STATE_JOINER = ' / ';
+
+/** 除草前の状態の行の先頭（RecordForm.js の RECORD_FORM_STATE_LINE_PREFIX_ と同じ値）。 */
+var STATE_LINE_PREFIX = '除草前の状態：';
+
+/** 除草前の状態の画面の文。 */
+var RECORD_APP_STATE_TEXT = {
+  heading: '除草前の状態（任意）',
+  note: 'あてはまるものをいくつでも選べます。選ばなくても送信できます',
+  notRecorded: '除草前の状態を記録できていない可能性があります（管理者に連絡してください）'
+};
+
+/** 倍率の範囲（RecordForm.js の RECORD_FORM_RATIO_MIN_・RECORD_FORM_RATIO_MAX_ と同じ値）。 */
+var RATIO_MIN = 1;
+var RATIO_MAX = 10000;
+
+/** 結果・【記録】の行の先頭と接尾辞（RecordForm.js の同名の定数と同じ値）。 */
+var PART_LINE_PREFIX = '部位：';
+var DRUG_LINE_PREFIX = '薬剤：';
+var PROGRESS_LINE_PREFIX = '進み具合：';
+var RATIO_SUFFIX = '倍';
+var PROGRESS_SUFFIX = '%';
+
+/** 前回の記録を出す最大の行数（これを超えた分は「ほか n か所」）。 */
+var PREVIOUS_MAX_LINES = 3;
+
+/** 薬剤・倍率・部位・進み具合・詳しく・前回の記録の画面の文。 */
+var RECORD_APP_DETAIL_TEXT = {
+  drugHeading: '薬剤',
+  ratioHeading: '倍率',
+  ratioNoteHead: '何倍にうすめたかを数字で入れてください（1〜10000）。',
+  ratioNoteTail: 'のときは薬剤と倍率を入れると送信できます',
+  ratioError: '倍率は 1〜10000 の数字で入れてください',
+  partHeading: '部位（任意）',
+  partNote: '同じ場所でも部位ごとに分けて記録できます（「続けて記録する」で場所は残ります）',
+  progressHeading: '進み具合（任意）',
+  progressLabel: '進み具合',
+  progressNone: '未入力',
+  progressOpen: '進み具合を入れる',
+  progressClear: '未入力に戻す',
+  progressNote: '入れたいときだけ「進み具合を入れる」を押し、バーを動かして、この記録でどのくらい終わったかの感じを記録します。全部終わったときは入れなくてかまいません',
+  partItem: '部位',
+  progressItem: '進み具合',
+  stateItem: '除草前の状態',
+  detailsOpenHead: '詳しく（',
+  detailsOpenTail: '）',
+  detailsClose: '詳しくを閉じる',
+  summaryPrefix: '詳しく：',
+  summaryJoiner: '／',
+  itemJoiner: '・',
+  stateCountHead: '除草前の状態 ',
+  stateCountTail: 'つ',
+  moreHead: 'ほか ',
+  moreTail: ' か所',
+  notRecorded: '部位・薬剤・進み具合を記録できていない可能性があります（管理者に連絡してください）'
+};
+
 // ---- 純粋関数 ----
 
 /** config に LIFF ID と GAS の exec URL が正しい形で入っているとき true。 */
@@ -102,12 +160,85 @@ function canSend(selected, method) {
   return Array.isArray(selected) && selected.length >= 1 && typeof method === 'string' && method !== '';
 }
 
-/** GAS への要求オブジェクト。record で range が長さ1以上の配列のときだけ method の後に range（コピー）を付ける。 */
-function buildRequest(action, idToken, locations, method, range) {
+/**
+ * GAS への要求オブジェクト。record で range が長さ1以上の配列のときだけ method の後に range（コピー）を付ける。
+ * record で states が長さ1以上の配列のときだけ、その後に states（コピー）を付ける。
+ * record で details があれば、その後に part → drug と ratio（両方そろうときだけ）→ progress → previous の順に付ける。
+ */
+function buildRequest(action, idToken, locations, method, range, states, details) {
   if (action === 'form') return { action: action, idToken: idToken };
   var req = { action: action, idToken: idToken, locations: locations, method: method };
   if (action === 'record' && Array.isArray(range) && range.length >= 1) req.range = range.slice();
+  if (action === 'record' && Array.isArray(states) && states.length >= 1) req.states = states.slice();
+  if (action === 'record' && details !== null && typeof details === 'object') {
+    if (typeof details.part === 'string' && details.part !== '') req.part = details.part;
+    if (typeof details.drug === 'string' && details.drug !== '' && Number.isInteger(details.ratio) &&
+      details.ratio >= RATIO_MIN && details.ratio <= RATIO_MAX) {
+      req.drug = details.drug;
+      req.ratio = details.ratio;
+    }
+    if (Number.isSafeInteger(details.progress)) req.progress = details.progress;
+    if (details.previous === true) req.previous = true;
+  }
   return req;
+}
+
+/** 進み具合のバーの範囲と刻み { min, max, step } の形なら true。 */
+function isProgressSpec(p) {
+  if (p === null || typeof p !== 'object' || Array.isArray(p)) return false;
+  if (!Number.isSafeInteger(p.min) || !Number.isSafeInteger(p.max) || !Number.isSafeInteger(p.step)) return false;
+  return p.step >= 1 && p.min < p.max && (p.max - p.min) % p.step === 0;
+}
+
+/** 進み具合が未入力のときのつまみの位置（min と max の真ん中を刻みに丸めた値）。 */
+function progressMiddle(p) {
+  return p.min + Math.round((p.max - p.min) / 2 / p.step) * p.step;
+}
+
+/** 進み具合の文（null → 未入力、整数 → 何 %）。 */
+function progressLabel(value) {
+  if (value === null) return PROGRESS_LINE_PREFIX + RECORD_APP_DETAIL_TEXT.progressNone;
+  return PROGRESS_LINE_PREFIX + value + PROGRESS_SUFFIX;
+}
+
+/** 倍率の入力を整数 1〜10000 に読む（全角数字も可）。読めなければ null。 */
+function parseRatio(text) {
+  if (typeof text !== 'string') return null;
+  var s = text.normalize('NFKC').trim();
+  if (!/^[0-9]{1,5}$/.test(s)) return null;
+  var n = Number(s);
+  return n >= RATIO_MIN && n <= RATIO_MAX ? n : null;
+}
+
+/**
+ * locations（表示順）について previous の text を拾った新しい配列。見つからない場所は飛ばす。
+ * 行が PREVIOUS_MAX_LINES を超えたら先頭の行＋「ほか n か所」。どちらかが配列でなければ []。引数は変えない。
+ */
+function previousLines(previous, locations) {
+  if (!Array.isArray(previous) || !Array.isArray(locations)) return [];
+  var lines = [];
+  for (var i = 0; i < locations.length; i++) {
+    for (var j = 0; j < previous.length; j++) {
+      var p = previous[j];
+      if (p !== null && typeof p === 'object' && p.location === locations[i] && typeof p.text === 'string') {
+        lines.push(p.text);
+        break;
+      }
+    }
+  }
+  if (lines.length <= PREVIOUS_MAX_LINES) return lines;
+  var rest = lines.length - PREVIOUS_MAX_LINES;
+  return lines.slice(0, PREVIOUS_MAX_LINES).concat([RECORD_APP_DETAIL_TEXT.moreHead + rest + RECORD_APP_DETAIL_TEXT.moreTail]);
+}
+
+/** options の順で selected に含まれるものの新しい配列（重複なし）。どちらかが配列でなければ []。引数は変えない。 */
+function orderedStates(options, selected) {
+  var out = [];
+  if (!Array.isArray(options) || !Array.isArray(selected)) return out;
+  for (var i = 0; i < options.length; i++) {
+    if (selected.indexOf(options[i]) >= 0 && out.indexOf(options[i]) < 0) out.push(options[i]);
+  }
+  return out;
 }
 
 /** 記録できた場所があるときグループへ送る文、それ以外は null。範囲があれば各場所を「コード（東・南）」にする。 */
@@ -120,7 +251,16 @@ function buildNoticeText(response) {
     var suffix = '（' + response.range.join('・') + '）';
     places = places.map(function (code) { return code + suffix; });
   }
-  return NOTICE_PREFIX + places.join('・') + ' ' + response.method;
+  var text = NOTICE_PREFIX + places.join('・') + ' ' + response.method;
+  if (typeof response.part === 'string' && response.part !== '') text += '\n' + PART_LINE_PREFIX + response.part;
+  if (typeof response.drug === 'string' && response.drug !== '' && Number.isInteger(response.ratio)) {
+    text += '\n' + DRUG_LINE_PREFIX + response.drug + ' ' + response.ratio + RATIO_SUFFIX;
+  }
+  if (Number.isSafeInteger(response.progress)) text += '\n' + PROGRESS_LINE_PREFIX + response.progress + PROGRESS_SUFFIX;
+  if (recordAppIsStringArray_(response.states) && response.states.length >= 1) {
+    text += '\n' + STATE_LINE_PREFIX + response.states.join(STATE_JOINER);
+  }
+  return text;
 }
 
 /**
@@ -247,6 +387,22 @@ function recordAppIsForm_(data) {
     var g = data.groups[i];
     if (g === null || typeof g !== 'object' || typeof g.label !== 'string' || !recordAppIsStringArray_(g.locations)) return false;
   }
+  if (data.states !== undefined && !recordAppIsStringArray_(data.states)) return false;
+  if (data.drugMethod !== undefined && typeof data.drugMethod !== 'string') return false;
+  if (data.drugs !== undefined && !recordAppIsStringArray_(data.drugs)) return false;
+  if (data.parts !== undefined && !recordAppIsStringArray_(data.parts)) return false;
+  if (data.progress !== undefined && !isProgressSpec(data.progress)) return false;
+  if (data.previous !== undefined && !recordAppIsPreviousList_(data.previous)) return false;
+  return true;
+}
+
+/** 前回の記録の一覧（{ location, text } の配列）の形か。 */
+function recordAppIsPreviousList_(a) {
+  if (!Array.isArray(a)) return false;
+  for (var i = 0; i < a.length; i++) {
+    var p = a[i];
+    if (p === null || typeof p !== 'object' || typeof p.location !== 'string' || typeof p.text !== 'string') return false;
+  }
   return true;
 }
 
@@ -260,7 +416,12 @@ function recordAppStart_() {
   var T = RECORD_APP_TEXT;
   var TC = RECORD_APP_CANCEL_TEXT;
   var config = typeof RECORD_APP_CONFIG !== 'undefined' ? RECORD_APP_CONFIG : null;
-  var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false };
+  var TS = RECORD_APP_STATE_TEXT;
+  var TD = RECORD_APP_DETAIL_TEXT;
+  var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
+    drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false };
+  /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
+  var sendButton = null;
 
   function el(tag, className, text) {
     var e = document.createElement(tag);
@@ -323,8 +484,214 @@ function recordAppStart_() {
     return b;
   }
 
+  /** FORM に部位か進み具合があるとき「詳しく」を使う。 */
+  function hasDetails() {
+    return state.parts.length >= 1 || state.progressSpec !== null;
+  }
+
+  /** 薬剤・倍率の欄を出すか（薬剤の手段が選ばれていて、薬剤の選択肢があるとき）。 */
+  function drugShown() {
+    return state.drugMethod !== '' && state.drugs.length >= 1 && state.method === state.drugMethod;
+  }
+
+  /** 送信できるか（既存の条件＋薬剤・倍率の欄が出ているときは薬剤と正しい倍率）。 */
+  function ready() {
+    if (!canSend(state.selected, state.method)) return false;
+    return !drugShown() || (state.drug !== '' && parseRatio(state.ratioText) !== null);
+  }
+
+  /** 場所以外の選択・入力とエラーを外す。 */
+  function clearChoices() {
+    state.range = [];
+    state.method = '';
+    state.states = [];
+    state.drug = '';
+    state.ratioText = '';
+    state.part = '';
+    state.progress = null;
+    state.progressOpen = false;
+    state.error = '';
+  }
+
+  function renderRange() {
+    root.appendChild(el('h2', 'heading', T.rangeHeading));
+    var ranges = el('div', 'choices');
+    [T.rangeWhole].concat(RANGE_DIRECTIONS).forEach(function (dir) {
+      var isSelected = dir === T.rangeWhole ? state.range.length === 0 : state.range.indexOf(dir) >= 0;
+      ranges.appendChild(choiceButton(dir, isSelected, function () {
+        if (state.sending) return;
+        state.range = toggleRange(state.range, dir);
+        state.error = '';
+        renderSelect();
+      }));
+    });
+    root.appendChild(ranges);
+    root.appendChild(el('p', 'note', T.rangeNote));
+  }
+
+  function renderStates() {
+    root.appendChild(el('h2', 'heading', TS.heading));
+    var states = el('div', 'choices state-choices');
+    state.stateOptions.forEach(function (s) {
+      states.appendChild(choiceButton(s, state.states.indexOf(s) >= 0, function () {
+        if (state.sending) return;
+        state.states = toggleLocation(state.states, s);
+        state.error = '';
+        renderSelect();
+      }));
+    });
+    root.appendChild(states);
+    root.appendChild(el('p', 'note', TS.note));
+  }
+
+  /** 倍率のエラーの行を、入力が空でなく読めないときだけ出す（その場で更新）。 */
+  function updateRatioError(area) {
+    while (area.firstChild) area.removeChild(area.firstChild);
+    if (state.ratioText !== '' && parseRatio(state.ratioText) === null) area.appendChild(el('p', 'status error', TD.ratioError));
+  }
+
+  function renderDrug() {
+    root.appendChild(el('h2', 'heading', TD.drugHeading));
+    var drugs = el('div', 'choices drug-choices');
+    state.drugs.forEach(function (d) {
+      drugs.appendChild(choiceButton(d, state.drug === d, function () {
+        if (state.sending) return;
+        state.drug = state.drug === d ? '' : d;
+        state.error = '';
+        renderSelect();
+      }));
+    });
+    root.appendChild(drugs);
+    root.appendChild(el('h2', 'heading', TD.ratioHeading));
+    var input = el('input', 'ratio');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.setAttribute('inputmode', 'numeric');
+    input.pattern = '[0-9]*';
+    input.autocomplete = 'off';
+    input.maxLength = 5;
+    input.setAttribute('aria-label', TD.ratioHeading);
+    input.style.width = '100%';
+    input.style.height = '48px';
+    input.style.fontSize = '18px';
+    input.value = state.ratioText;
+    input.disabled = state.sending;
+    var errorArea = el('div');
+    input.addEventListener('input', function () {
+      if (state.sending) return;
+      state.ratioText = String(input.value);
+      updateRatioError(errorArea);
+      if (sendButton !== null) sendButton.disabled = state.sending || !ready();
+    });
+    root.appendChild(input);
+    root.appendChild(el('p', 'note', TD.ratioNoteHead + state.drugMethod + TD.ratioNoteTail));
+    root.appendChild(errorArea);
+    updateRatioError(errorArea);
+  }
+
+  function renderPart() {
+    root.appendChild(el('h2', 'heading', TD.partHeading));
+    var parts = el('div', 'choices part-choices');
+    state.parts.forEach(function (p) {
+      parts.appendChild(choiceButton(p, state.part === p, function () {
+        if (state.sending) return;
+        state.part = state.part === p ? '' : p;
+        state.error = '';
+        renderSelect();
+      }));
+    });
+    root.appendChild(parts);
+    root.appendChild(el('p', 'note', TD.partNote));
+  }
+
+  function renderProgress() {
+    var spec = state.progressSpec;
+    root.appendChild(el('h2', 'heading', TD.progressHeading));
+    var label = el('p', 'progress-value', progressLabel(state.progress));
+    root.appendChild(label);
+    if (!state.progressOpen) {
+      // スライダーは押したときだけ出す（縦のスワイプで値が入るのを防ぐ）。押しただけでは値を入れない
+      var open = button(TD.progressOpen, 'again progress-open', function () {
+        if (state.sending) return;
+        state.progressOpen = true;
+        renderSelect();
+      });
+      open.disabled = state.sending;
+      root.appendChild(open);
+      root.appendChild(el('p', 'note', TD.progressNote));
+      return;
+    }
+    var slider = el('input', 'progress-bar');
+    slider.type = 'range';
+    slider.min = String(spec.min);
+    slider.max = String(spec.max);
+    slider.step = String(spec.step);
+    slider.setAttribute('aria-label', TD.progressLabel);
+    slider.style.width = '100%';
+    slider.style.height = '48px';
+    slider.value = String(state.progress !== null ? state.progress : progressMiddle(spec));
+    if (state.progress !== null) slider.setAttribute('aria-valuetext', state.progress + PROGRESS_SUFFIX);
+    slider.disabled = state.sending;
+    var clearButton = button(TD.progressClear, 'reset progress-clear', function () {
+      if (state.sending) return;
+      state.progress = null;
+      state.progressOpen = false;
+      renderSelect();
+    });
+    clearButton.disabled = state.sending;
+    slider.addEventListener('input', function () {
+      if (state.sending) return;
+      var v = Number(slider.value);
+      if (!Number.isSafeInteger(v)) return;
+      state.progress = v;
+      label.textContent = progressLabel(v);
+      slider.setAttribute('aria-valuetext', v + PROGRESS_SUFFIX);
+    });
+    root.appendChild(slider);
+    root.appendChild(clearButton);
+    root.appendChild(el('p', 'note', TD.progressNote));
+  }
+
+  /** 閉じているときの「詳しく：…」の要約（選んだものがなければ空文字）。 */
+  function detailsSummary() {
+    var items = [];
+    if (state.part !== '') items.push(state.part);
+    if (state.range.length >= 1) items.push(state.range.join(TD.itemJoiner));
+    if (state.progress !== null) items.push(state.progress + PROGRESS_SUFFIX);
+    if (state.states.length >= 1) items.push(TD.stateCountHead + state.states.length + TD.stateCountTail);
+    return items.length ? TD.summaryPrefix + items.join(TD.summaryJoiner) : '';
+  }
+
+  function renderDetails() {
+    var items = [];
+    if (state.parts.length >= 1) items.push(TD.partItem);
+    items.push(T.rangeHeading);
+    if (state.progressSpec !== null) items.push(TD.progressItem);
+    if (state.stateOptions.length >= 1) items.push(TD.stateItem);
+    var toggle = button(state.detailsOpen ? TD.detailsClose : TD.detailsOpenHead + items.join(TD.itemJoiner) + TD.detailsOpenTail,
+      'again details-toggle', function () {
+        if (state.sending) return;
+        state.detailsOpen = !state.detailsOpen;
+        renderSelect();
+      });
+    toggle.setAttribute('aria-expanded', state.detailsOpen ? 'true' : 'false');
+    toggle.disabled = state.sending;
+    root.appendChild(toggle);
+    if (!state.detailsOpen) {
+      var summary = detailsSummary();
+      if (summary !== '') root.appendChild(el('p', 'note', summary));
+      return;
+    }
+    if (state.parts.length >= 1) renderPart();
+    renderRange();
+    if (state.progressSpec !== null) renderProgress();
+    if (state.stateOptions.length >= 1) renderStates();
+  }
+
   function renderSelect() {
     clear();
+    sendButton = null;
+    var details = hasDetails();
     root.appendChild(el('p', 'name', state.name + T.nameSuffix));
 
     root.appendChild(el('h2', 'heading', T.locationsHeading));
@@ -343,19 +710,15 @@ function recordAppStart_() {
       root.appendChild(box);
     });
 
-    root.appendChild(el('h2', 'heading', T.rangeHeading));
-    var ranges = el('div', 'choices');
-    [T.rangeWhole].concat(RANGE_DIRECTIONS).forEach(function (dir) {
-      var isSelected = dir === T.rangeWhole ? state.range.length === 0 : state.range.indexOf(dir) >= 0;
-      ranges.appendChild(choiceButton(dir, isSelected, function () {
-        if (state.sending) return;
-        state.range = toggleRange(state.range, dir);
-        state.error = '';
-        renderSelect();
-      }));
-    });
-    root.appendChild(ranges);
-    root.appendChild(el('p', 'note', T.rangeNote));
+    if (!details) renderRange();
+
+    if (state.previous !== null && state.selected.length >= 1) {
+      var prev = el('div', 'previous');
+      previousLines(state.previous, orderedSelection(state.groups, state.selected)).forEach(function (line) {
+        prev.appendChild(el('p', 'note', line));
+      });
+      root.appendChild(prev);
+    }
 
     root.appendChild(el('h2', 'heading', T.methodsHeading));
     var methods = el('div', 'choices');
@@ -363,11 +726,20 @@ function recordAppStart_() {
       methods.appendChild(choiceButton(m, state.method === m, function () {
         if (state.sending) return;
         state.method = state.method === m ? '' : m;
+        if (state.method !== state.drugMethod) {
+          state.drug = '';
+          state.ratioText = '';
+        }
         state.error = '';
         renderSelect();
       }));
     });
     root.appendChild(methods);
+
+    if (drugShown()) renderDrug();
+
+    if (details) renderDetails();
+    else if (state.stateOptions.length >= 1) renderStates();
 
     root.appendChild(el('p', 'note', T.noticeInfo));
 
@@ -379,15 +751,14 @@ function recordAppStart_() {
     var reset = button(T.reset, 'reset', function () {
       if (state.sending) return;
       state.selected = [];
-      state.range = [];
-      state.method = '';
-      state.error = '';
+      clearChoices();
       renderSelect();
     });
     reset.disabled = state.sending;
     row.appendChild(reset);
     var send = button(T.send, 'send', onSend);
-    send.disabled = state.sending || !canSend(state.selected, state.method);
+    send.disabled = state.sending || !ready();
+    sendButton = send;
     row.appendChild(send);
     bar.appendChild(row);
     var cancelRow = el('div', 'action-row');
@@ -402,16 +773,25 @@ function recordAppStart_() {
   }
 
   function onSend() {
-    if (state.sending || !canSend(state.selected, state.method)) return;
+    if (state.sending || !ready()) return;
+    var details = { previous: state.previous !== null };
+    if (state.part !== '') details.part = state.part;
+    if (drugShown()) {
+      details.drug = state.drug;
+      details.ratio = parseRatio(state.ratioText);
+    }
+    if (state.progress !== null) details.progress = state.progress;
     state.sending = true;
     state.error = '';
     renderSelect();
     var locations = orderedSelection(state.groups, state.selected);
     var range = state.range.slice();
-    post(buildRequest('record', state.idToken, locations, state.method, range)).then(function (r) {
+    var states = orderedStates(state.stateOptions, state.states);
+    post(buildRequest('record', state.idToken, locations, state.method, range, states, details)).then(function (r) {
       state.sending = false;
       if (r.ok && recordAppIsRecordOk_(r.data)) {
-        renderResult(r.data, range);
+        updatePrevious(r.data.previous);
+        renderResult(r.data, range, states, details);
         return;
       }
       if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') state.error = r.data.message;
@@ -431,21 +811,49 @@ function recordAppStart_() {
     return true;
   }
 
-  function renderResult(data, sentRange) {
+  /** RECORD_OK の previous で、その場所の前回の記録の行を差し替える（ない場所は加える）。 */
+  function updatePrevious(list) {
+    if (state.previous === null || !recordAppIsPreviousList_(list)) return;
+    var next = state.previous.slice();
+    list.forEach(function (p) {
+      var item = { location: p.location, text: p.text };
+      for (var i = 0; i < next.length; i++) {
+        if (next[i].location === p.location) {
+          next[i] = item;
+          return;
+        }
+      }
+      next.push(item);
+    });
+    state.previous = next;
+  }
+
+  /** 送った部位・薬剤と倍率・進み具合のどれかが応答と一致しなければ true。 */
+  function detailsMissing(sent, data) {
+    if (sent.part !== undefined && data.part !== sent.part) return true;
+    if (sent.drug !== undefined && (data.drug !== sent.drug || data.ratio !== sent.ratio)) return true;
+    if (sent.progress !== undefined && data.progress !== sent.progress) return true;
+    return false;
+  }
+
+  function renderResult(data, sentRange, sentStates, sentDetails) {
     clear();
     root.appendChild(el('p', 'result', data.message));
     if (sentRange.length >= 1 && !sameRange(sentRange, data.range)) {
       root.appendChild(el('p', 'status error', T.rangeNotRecorded));
+    }
+    if (sentStates.length >= 1 && !sameRange(sentStates, data.states)) {
+      root.appendChild(el('p', 'status error', TS.notRecorded));
+    }
+    if (detailsMissing(sentDetails, data)) {
+      root.appendChild(el('p', 'status error', TD.notRecorded));
     }
     root.appendChild(el('p', 'note', T.noticeInfo));
     var noticeArea = el('div', 'notice-area');
     root.appendChild(noticeArea);
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(T.again, 'again', function () {
-      state.selected = [];
-      state.range = [];
-      state.method = '';
-      state.error = '';
+      clearChoices();
       renderSelect();
     }));
     row.appendChild(button(T.close, 'close', function () {
@@ -481,9 +889,7 @@ function recordAppStart_() {
   /** 場所・範囲・手段の選択とエラーを全部解除して選ぶ画面へ（FORM を送り直さない）。 */
   function backToRecord() {
     state.selected = [];
-    state.range = [];
-    state.method = '';
-    state.error = '';
+    clearChoices();
     renderSelect();
   }
 
@@ -630,6 +1036,19 @@ function recordAppStart_() {
       state.name = data.name;
       state.groups = data.groups;
       state.methods = data.methods;
+      state.stateOptions = Array.isArray(data.states) ? data.states : [];
+      state.states = [];
+      state.drugMethod = typeof data.drugMethod === 'string' ? data.drugMethod : '';
+      state.drugs = Array.isArray(data.drugs) ? data.drugs : [];
+      state.parts = Array.isArray(data.parts) ? data.parts : [];
+      state.progressSpec = data.progress !== undefined ? data.progress : null;
+      state.previous = Array.isArray(data.previous) ? data.previous.slice() : null;
+      state.detailsOpen = false;
+      state.drug = '';
+      state.ratioText = '';
+      state.part = '';
+      state.progress = null;
+      state.progressOpen = false;
       state.selected = presetSelection(data.groups, preset);
       renderSelect();
     }).catch(function () {
