@@ -1,7 +1,7 @@
 /*
  * 記録画面（LIFF）。場所を複数ボタンで選び、手段ボタンを1つ選んで送信する。
  * 場所・手段の一覧は毎回 GAS から受け取る（このファイルに農園の情報を書かない）。
- * 表示はすべて createElement と textContent で作る。キーボードを出す要素は倍率の入力欄だけ（進み具合はスライダー）。
+ * 表示はすべて createElement と textContent で作る。キーボードを出す要素は倍率の入力欄と、依頼の確認の画面の依頼した人・依頼先の欄だけ（進み具合はスライダー）。
  */
 
 /** グループへ送る文の先頭（Handler.js の無視の条件と同じ文字列）。 */
@@ -135,7 +135,14 @@ var RECORD_APP_REQUEST_TEXT = {
   listHeading: '取り消せる依頼',
   listNote: '自分の依頼のうち、まだ解除されていないものだけ取り消せます',
   empty: '取り消せる依頼はありません',
-  cancelConfirm: 'この依頼を取り消しますか？'
+  cancelConfirm: 'この依頼を取り消しますか？',
+  fromHeading: '依頼した人',
+  fromNote: 'ほかの人に頼まれて入れるときは、その人の名前に書き換えてください（空のときは LINE の名前になります）',
+  toHeading: '依頼先（任意）',
+  toLabel: '依頼先',
+  toNote: '名前のボタンを押すか、名前を入れてください（空のときは依頼先なし）',
+  arrow: '→',
+  fromTail: 'より'
 };
 
 // ---- 純粋関数 ----
@@ -390,21 +397,41 @@ function recordAppIsCancelOk_(data) {
   return c !== null && typeof c === 'object' && typeof c.time === 'string' && typeof c.label === 'string';
 }
 
-/** 除草の依頼の要求（locations はコピー。引数は変えない）。 */
-function buildRequestBody(idToken, locations) {
-  return { action: 'request', idToken: idToken, locations: Array.isArray(locations) ? locations.slice() : [] };
+/** 依頼した人・依頼先の欄の値を送る形にする（文字列でなければ空。制御文字は半角スペースにし、前後の空白を除く）。 */
+function requestPersonValue(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(/[\u0000-\u001F\u007F]/g, ' ').trim();
 }
 
-/** REQUEST_OK の形か（result が ok、message が文字列、requested・already・rejected が文字列の配列）。 */
+/**
+ * 除草の依頼の要求（locations はコピー。引数は変えない）。
+ * requester・requestee は空でない文字列のときだけ、この順に付ける（2引数なら付けない）。
+ */
+function buildRequestBody(idToken, locations, requester, requestee) {
+  var body = { action: 'request', idToken: idToken, locations: Array.isArray(locations) ? locations.slice() : [] };
+  if (typeof requester === 'string' && requester !== '') body.requester = requester;
+  if (typeof requestee === 'string' && requestee !== '') body.requestee = requestee;
+  return body;
+}
+
+/**
+ * REQUEST_OK の形か（result が ok、message が文字列、requested・already・rejected が文字列の配列）。
+ * requester・requestee は両方ないか、requester が空でない文字列で requestee が文字列のときだけ通す。
+ */
 function recordAppIsRequestOk_(data) {
   if (data === null || typeof data !== 'object' || data.result !== 'ok' || typeof data.message !== 'string') return false;
-  return recordAppIsStringArray_(data.requested) && recordAppIsStringArray_(data.already) && recordAppIsStringArray_(data.rejected);
+  if (!recordAppIsStringArray_(data.requested) || !recordAppIsStringArray_(data.already) || !recordAppIsStringArray_(data.rejected)) return false;
+  if (data.requester === undefined && data.requestee === undefined) return true;
+  return typeof data.requester === 'string' && data.requester !== '' && typeof data.requestee === 'string';
 }
 
-/** 依頼できた場所があるときグループへ送る文、それ以外は null。 */
+/** 依頼できた場所があるときグループへ送る文、それ以外は null。依頼した人があれば（依頼した人→依頼先）か（依頼した人より）を付ける。 */
 function buildRequestNoticeText(response) {
   if (!recordAppIsRequestOk_(response) || response.requested.length === 0) return null;
-  return REQUEST_NOTICE_PREFIX + response.requested.join('・') + RECORD_APP_REQUEST_TEXT.noticeTail;
+  var TR = RECORD_APP_REQUEST_TEXT;
+  var text = REQUEST_NOTICE_PREFIX + response.requested.join('・') + TR.noticeTail;
+  if (response.requester === undefined) return text;
+  return text + '（' + response.requester + (response.requestee !== '' ? TR.arrow + response.requestee : TR.fromTail) + '）';
 }
 
 /** 自分の取り消せる依頼の一覧の要求。 */
@@ -454,6 +481,7 @@ function recordAppIsForm_(data) {
   if (data.progress !== undefined && !isProgressSpec(data.progress)) return false;
   if (data.previous !== undefined && !recordAppIsPreviousList_(data.previous)) return false;
   if (data.request !== undefined && data.request !== true) return false;
+  if (data.requestees !== undefined && (!recordAppIsStringArray_(data.requestees) || data.request !== true)) return false;
   return true;
 }
 
@@ -481,7 +509,7 @@ function recordAppStart_() {
   var TD = RECORD_APP_DETAIL_TEXT;
   var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
     drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false,
-    request: false, requesting: false, requestMine: [], requestCancelling: false };
+    request: false, requesting: false, requestMine: [], requestCancelling: false, requestees: null, requestFrom: '', requestTo: '' };
   /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
   var sendButton = null;
 
@@ -1113,14 +1141,79 @@ function recordAppStart_() {
     card.appendChild(el('p', 'note', TR.noticeInfo));
   }
 
-  /** 依頼の確認の画面。「依頼する」で request を1回だけ送る。 */
+  /**
+   * 依頼の確認の画面。「依頼する」で request を1回だけ送る。
+   * FORM に requestees があるときだけ、依頼した人・依頼先の欄を出す（なければ欄なし）。
+   */
   function renderRequestConfirm() {
     var TR = RECORD_APP_REQUEST_TEXT;
     var locations = orderedSelection(state.groups, state.selected);
+    var persons = state.requestees !== null;
+    var fromInput = null;
+    var toInput = null;
+    var toChoices = null;
     clear();
     root.appendChild(el('p', 'message', TR.confirm));
     root.appendChild(el('p', 'result', locations.join('・')));
+    if (persons) {
+      root.appendChild(el('h2', 'heading', TR.fromHeading));
+      fromInput = el('input', 'request-from');
+      fromInput.type = 'text';
+      fromInput.maxLength = 30;
+      fromInput.autocomplete = 'off';
+      fromInput.setAttribute('aria-label', TR.fromHeading);
+      fromInput.style.width = '100%';
+      fromInput.style.height = '48px';
+      fromInput.style.fontSize = '18px';
+      fromInput.value = state.requestFrom;
+      fromInput.addEventListener('input', function () {
+        if (state.requesting) return;
+        state.requestFrom = String(fromInput.value);
+      });
+      root.appendChild(fromInput);
+      root.appendChild(el('p', 'note', TR.fromNote));
+      root.appendChild(el('h2', 'heading', TR.toHeading));
+      if (state.requestees.length >= 1) {
+        toChoices = el('div', 'choices');
+        root.appendChild(toChoices);
+      }
+      toInput = el('input', 'request-to');
+      toInput.type = 'text';
+      toInput.maxLength = 30;
+      toInput.autocomplete = 'off';
+      toInput.setAttribute('aria-label', TR.toLabel);
+      toInput.style.width = '100%';
+      toInput.style.height = '48px';
+      toInput.style.fontSize = '18px';
+      toInput.value = state.requestTo;
+      toInput.addEventListener('input', function () {
+        if (state.requesting) return;
+        state.requestTo = String(toInput.value);
+        renderToChoices();
+      });
+      root.appendChild(toInput);
+      root.appendChild(el('p', 'note', TR.toNote));
+      renderToChoices();
+    }
     root.appendChild(el('p', 'note', TR.noticeInfo));
+
+    /** 依頼先のボタンを作り直す（欄の値と完全一致する名前だけ選択中。欄は作り直さない）。 */
+    function renderToChoices() {
+      if (toChoices === null) return;
+      while (toChoices.firstChild) toChoices.removeChild(toChoices.firstChild);
+      var current = requestPersonValue(state.requestTo);
+      state.requestees.forEach(function (name) {
+        var b = choiceButton(name, current === name, function () {
+          if (state.requesting) return;
+          state.requestTo = requestPersonValue(state.requestTo) === name ? '' : name;
+          toInput.value = state.requestTo;
+          renderToChoices();
+        });
+        b.disabled = state.requesting;
+        toChoices.appendChild(b);
+      });
+    }
+
     var row = el('div', 'action-row');
     var no = button(TC.no, 'reset request-no', function () {
       if (state.requesting) return;
@@ -1128,11 +1221,24 @@ function recordAppStart_() {
     });
     var yes = button(TR.yes, 'send request-yes', function () {
       if (state.requesting) return;
+      var body;
+      if (persons) {
+        var from = requestPersonValue(state.requestFrom);
+        if (from === requestPersonValue(state.name)) from = '';
+        body = buildRequestBody(state.idToken, locations, from, requestPersonValue(state.requestTo));
+      } else {
+        body = buildRequestBody(state.idToken, locations);
+      }
       state.requesting = true;
       no.disabled = true;
       yes.disabled = true;
+      if (persons) {
+        fromInput.disabled = true;
+        toInput.disabled = true;
+        renderToChoices();
+      }
       root.appendChild(el('p', 'status', T.sending));
-      post(buildRequestBody(state.idToken, locations)).then(function (r) {
+      post(body).then(function (r) {
         state.requesting = false;
         renderRequestResult(r);
       }).catch(function () {
@@ -1322,6 +1428,9 @@ function recordAppStart_() {
       state.progressSpec = data.progress !== undefined ? data.progress : null;
       state.previous = Array.isArray(data.previous) ? data.previous.slice() : null;
       state.request = data.request === true;
+      state.requestees = Array.isArray(data.requestees) ? data.requestees.slice() : null;
+      state.requestFrom = data.name;
+      state.requestTo = '';
       state.detailsOpen = false;
       state.drug = '';
       state.ratioText = '';
