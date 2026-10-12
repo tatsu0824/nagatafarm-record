@@ -145,6 +145,13 @@ var RECORD_APP_REQUEST_TEXT = {
   fromTail: 'より'
 };
 
+/** 選ぶ画面の「地図を見る」の文。 */
+var RECORD_APP_MAP_TEXT = {
+  open: '地図を見る',
+  failed: '地図を開けませんでした。もう一度「地図を見る」を押してください',
+  missing: '地図の準備ができていません（管理者に連絡してください）'
+};
+
 // ---- 純粋関数 ----
 
 /** config に LIFF ID と GAS の exec URL が正しい形で入っているとき true。 */
@@ -338,6 +345,41 @@ function readPresetLocation(search) {
   }
 }
 
+/** FORM の要求。地図の URL もほしい印 map: true を付ける。 */
+function buildFormBody(idToken) {
+  return { action: 'form', idToken: idToken, map: true };
+}
+
+/**
+ * URL のクエリ（例 ?go=map）に地図を開く印があるとき true。readPresetLocation と同じ読み方で go を読む。
+ * go がなければ liff.state の中の go を読む。値がちょうど1個で map と完全一致のときだけ true。例外を投げない。
+ */
+function readGoMap(search) {
+  try {
+    if (typeof search !== 'string' || typeof URLSearchParams !== 'function') return false;
+    var p = new URLSearchParams(search);
+    var list = p.getAll('go');
+    if (list.length === 0) {
+      var states = p.getAll('liff.state');
+      if (states.length !== 1) return false;
+      var q = states[0].indexOf('?');
+      if (q < 0) return false;
+      var rest = states[0].slice(q + 1);
+      var h = rest.indexOf('#');
+      if (h >= 0) rest = rest.slice(0, h);
+      list = new URLSearchParams(rest).getAll('go');
+    }
+    return list.length === 1 && list[0] === 'map';
+  } catch (e) {
+    return false;
+  }
+}
+
+/** GAS が返す地図の URL（合言葉付き）の形なら true。 */
+function isMapUrl(v) {
+  return typeof v === 'string' && /^https:\/\/[^\s?#]+\?key=[^\s?#&]+$/.test(v);
+}
+
 /** Parser.js の normalizeText_ と同じ規則の正規化。 */
 function recordAppPresetKey_(s) {
   return s.normalize('NFKC').replace(/　/g, ' ').toUpperCase().trim();
@@ -482,6 +524,7 @@ function recordAppIsForm_(data) {
   if (data.previous !== undefined && !recordAppIsPreviousList_(data.previous)) return false;
   if (data.request !== undefined && data.request !== true) return false;
   if (data.requestees !== undefined && (!recordAppIsStringArray_(data.requestees) || data.request !== true)) return false;
+  if (data.mapUrl !== undefined && !isMapUrl(data.mapUrl)) return false;
   return true;
 }
 
@@ -509,7 +552,8 @@ function recordAppStart_() {
   var TD = RECORD_APP_DETAIL_TEXT;
   var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
     drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false,
-    request: false, requesting: false, requestMine: [], requestCancelling: false, requestees: null, requestFrom: '', requestTo: '' };
+    request: false, requesting: false, requestMine: [], requestCancelling: false, requestees: null, requestFrom: '', requestTo: '',
+    mapUrl: null, mapError: '' };
   /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
   var sendButton = null;
 
@@ -782,6 +826,16 @@ function recordAppStart_() {
     sendButton = null;
     var details = hasDetails();
     root.appendChild(el('p', 'name', state.name + T.nameSuffix));
+    if (state.mapUrl !== null) {
+      var mapRow = el('div', 'action-row');
+      var mapOpen = button(RECORD_APP_MAP_TEXT.open, 'again map-open', function () {
+        openMap();
+      });
+      mapOpen.disabled = state.sending;
+      mapRow.appendChild(mapOpen);
+      root.appendChild(mapRow);
+    }
+    if (state.mapError !== '') root.appendChild(el('p', 'status error', state.mapError));
 
     var placeCard = el('div', 'card card-place');
     root.appendChild(placeCard);
@@ -873,6 +927,24 @@ function recordAppStart_() {
     cancelRow.appendChild(cancelOpen);
     root.appendChild(cancelRow);
     root.appendChild(bar);
+  }
+
+  /** 地図を LINE の中のブラウザで開く（mapUrl は openWindow に渡すだけ）。失敗の文が変わったときだけ作り直す。 */
+  function openMap() {
+    if (state.mapUrl === null || state.sending) return;
+    var opened = false;
+    try {
+      if (typeof liff.openWindow === 'function') {
+        liff.openWindow({ url: state.mapUrl, external: false });
+        opened = true;
+      }
+    } catch (e) {
+      opened = false;
+    }
+    var next = opened ? '' : RECORD_APP_MAP_TEXT.failed;
+    if (next === state.mapError) return;
+    state.mapError = next;
+    renderSelect();
   }
 
   function onSend() {
@@ -1396,8 +1468,9 @@ function recordAppStart_() {
     root.appendChild(requestCancelResultRow());
   }
 
-  function loadForm(preset) {
-    post(buildRequest('form', state.idToken)).then(function (r) {
+  /** FORM を読む。goMap（起動時の go=map）は確認が済んで選ぶ画面を出すときに1回だけ使う。 */
+  function loadForm(preset, goMap) {
+    post(buildFormBody(state.idToken)).then(function (r) {
       if (!r.ok) {
         showMessage(T.loadFailed);
         return;
@@ -1438,7 +1511,10 @@ function recordAppStart_() {
       state.progress = null;
       state.progressOpen = false;
       state.selected = presetSelection(data.groups, preset);
+      state.mapUrl = data.mapUrl !== undefined ? data.mapUrl : null;
+      if (goMap === true && state.mapUrl === null) state.mapError = RECORD_APP_MAP_TEXT.missing;
       renderSelect();
+      if (goMap === true && state.mapUrl !== null) openMap();
     }).catch(function () {
       showMessage(T.loadFailed);
     });
@@ -1459,12 +1535,16 @@ function recordAppStart_() {
     }
     state.idToken = token;
     var preset;
+    var goMap;
     try {
-      preset = readPresetLocation(window.location.search);
+      var search = window.location.search;
+      preset = readPresetLocation(search);
+      goMap = readGoMap(search);
     } catch (e) {
       preset = null;
+      goMap = false;
     }
-    loadForm(preset);
+    loadForm(preset, goMap);
   }, function () {
     showMessage(T.liffFailed);
   }).catch(function () {
