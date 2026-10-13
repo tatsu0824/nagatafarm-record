@@ -1536,13 +1536,20 @@ function recordAppStart_() {
     state.idToken = token;
     var preset;
     var goMap;
+    var stockMode;
     try {
       var search = window.location.search;
       preset = readPresetLocation(search);
       goMap = readGoMap(search);
+      stockMode = typeof stockAppMode === 'function' ? stockAppMode(search) : '';
     } catch (e) {
       preset = null;
       goMap = false;
+      stockMode = '';
+    }
+    if (stockMode !== '' && typeof stockAppStart === 'function') {
+      stockAppStart(root, config, token, stockMode);
+      return;
     }
     loadForm(preset, goMap);
   }, function () {
