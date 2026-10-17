@@ -69,8 +69,25 @@ var STOCK_APP_TEXT = {
   cancelUnknown: '取り消せたか分かりません。「続けて取り消す」で一覧を開き直して確かめてください',
   cancelMore: '続けて取り消す',
   backToRecord: '在庫の記録に戻る',
-  close: '閉じる'
+  close: '閉じる',
+  batchOpen: 'まとめて記録（棚卸・納品）',
+  batchOne: '1つずつ記録',
+  batchNoteIn: '入れた数を書いてください（1〜999）。空欄の品目は記録しません',
+  batchNoteOut: '使った数を書いてください（1〜999）。空欄の品目は記録しません',
+  batchNoteCount: 'いま数えた数を書いてください（0〜999）。この数が残りになります。空欄の品目は記録しません',
+  batchCountHead: '記録する品目：',
+  batchInvalidHead: '数が正しくない品目があります：',
+  batchConfirm: 'この内容でまとめて記録しますか？',
+  batchBullet: '・',
+  batchExpectedOpen: '（記録後の残り ',
+  batchSend: 'まとめて記録する',
+  batchAfter: '記録後の残り',
+  batchBackToInput: '入力に戻る',
+  batchLabelTail: 'の数'
 };
+
+/** まとめての記録で一度に送れる品目の上限。 */
+var STOCK_BATCH_MAX = 200;
 
 /** 動きの値（GAS の move と同じ）。この順にボタンを並べる。 */
 var STOCK_MOVES = ['in', 'out', 'count'];
@@ -149,6 +166,25 @@ function stockItemLine(entry, unit) {
   return line;
 }
 
+/**
+ * 在庫の行の左と右の文字（{ name, amount }）。name は品目名と印、amount は残りの数と単位（null なら記録なし）。
+ * stockItemLine(entry, unit) === entry.item + ' ' + amount + 印 になる。entry を変えない。例外を投げない。
+ */
+function stockItemParts(entry, unit) {
+  var T = STOCK_APP_TEXT;
+  if (entry === null || typeof entry !== 'object') return { name: '', amount: '' };
+  var u = typeof unit === 'string' ? unit : '';
+  var stock = entry.stock;
+  var amount = typeof stock === 'number' ? stock + u : T.none;
+  var order = entry.order === true;
+  var recount = typeof stock === 'number' && stock < 0;
+  var mark = '';
+  if (order && recount) mark = T.markBoth;
+  else if (order) mark = T.markOrder;
+  else if (recount) mark = T.markRecount;
+  return { name: entry.item + mark, amount: amount };
+}
+
 function stockListBody(idToken) {
   return { action: 'stockList', idToken: idToken };
 }
@@ -224,12 +260,51 @@ function stockRecordKinds(data) {
 }
 
 /**
+ * まとめての表の行（[{ item, text }]。表の順）を読む。{ entries: [{ item, count }], invalid: [item, …] } を返す。
+ * 空欄（文字列でない、または NFKC・前後の空白除きで ''）は飛ばす。形の違う要素も飛ばす。rows を変えない。例外を投げない。
+ */
+function stockBatchEntries(rows, move) {
+  var out = { entries: [], invalid: [] };
+  if (!Array.isArray(rows)) return out;
+  rows.forEach(function (r) {
+    if (r === null || typeof r !== 'object' || typeof r.item !== 'string' || r.item.length < 1) return;
+    if (typeof r.text !== 'string' || r.text.normalize('NFKC').trim() === '') return;
+    var n = stockParseCount(r.text, move);
+    if (n === null) out.invalid.push(r.item);
+    else out.entries.push({ item: r.item, count: n });
+  });
+  return out;
+}
+
+function stockBatchBody(idToken, kind, move, entries) {
+  return {
+    action: 'stockBatch', idToken: idToken, kind: kind, move: move,
+    entries: entries.map(function (e) { return { item: e.item, count: e.count }; })
+  };
+}
+
+/** STOCK_BATCH_OK の形なら true。 */
+function stockIsBatchOk(data) {
+  if (!stockIsObject_(data) || data.result !== 'ok') return false;
+  if (typeof data.message !== 'string' || typeof data.kind !== 'string' || typeof data.unit !== 'string') return false;
+  if (STOCK_MOVES.indexOf(data.move) < 0) return false;
+  if (!Array.isArray(data.results) || data.results.length < 1) return false;
+  return data.results.every(function (r) {
+    return stockIsObject_(r) && typeof r.item === 'string' && r.item.length >= 1 &&
+      typeof r.count === 'number' && Number.isInteger(r.count) && typeof r.stock === 'number' && Number.isInteger(r.stock) &&
+      typeof r.order === 'boolean';
+  });
+}
+
+/**
  * 在庫の画面を root の中に作る（ブラウザだけで使う）。mode は 'stock'（在庫を記録）か 'stocklist'（在庫を見る）。
  * app.js の関数・状態は使わない。
  */
 function stockAppStart(root, config, idToken, mode) {
   var T = STOCK_APP_TEXT;
   var state = { name: '', kinds: [], kind: null, group: null, item: null, move: '', countText: '', count: null, sending: false, mine: [] };
+  /** まとめての画面の状態（動き・表に入れた文字（品目名ごと）・その種類・確認へ進んだときの entries）。 */
+  var batch = { kind: null, move: '', texts: Object.create(null), entries: [] };
   /** いま出ている「確認へ」のボタン（数の入力のたびに disabled だけを更新する）。 */
   var toConfirmButton = null;
 
@@ -262,6 +337,27 @@ function stockAppStart(root, config, idToken, mode) {
   function showMessage(title, text) {
     clear(title);
     root.appendChild(el('p', 'message', text));
+  }
+
+  /** 在庫の行（左に品目名と印、右に数）。warn なら赤い太字（既存の status error）。 */
+  function itemRow(entry, unit, warn) {
+    var parts = stockItemParts(entry, unit);
+    var row = el('div', warn ? 'status error' : 'name');
+    row.style.display = 'flex';
+    row.style.justifyContent = 'space-between';
+    row.style.alignItems = 'baseline';
+    row.style.gap = '8px';
+    var left = el('div', '', parts.name);
+    left.style.flex = '1 1 auto';
+    left.style.minWidth = '0';
+    left.style.overflowWrap = 'anywhere';
+    var right = el('div', '', parts.amount);
+    right.style.flex = '0 0 auto';
+    right.style.textAlign = 'right';
+    right.style.whiteSpace = 'nowrap';
+    row.appendChild(left);
+    row.appendChild(right);
+    return row;
   }
 
   function closeButton() {
@@ -421,6 +517,7 @@ function stockAppStart(root, config, idToken, mode) {
           state.item = null;
           state.move = '';
           state.countText = '';
+          resetBatch();
           renderSelect();
         }));
       });
@@ -533,6 +630,9 @@ function stockAppStart(root, config, idToken, mode) {
     navRow.appendChild(button(T.openList, 'again', openList));
     navRow.appendChild(button(T.cancelOpen, 'again', openCancelList));
     bar.appendChild(navRow);
+    var batchRow = el('div', 'action-row');
+    batchRow.appendChild(button(T.batchOpen, 'again', renderBatch));
+    bar.appendChild(batchRow);
     root.appendChild(bar);
   }
 
@@ -596,6 +696,272 @@ function stockAppStart(root, config, idToken, mode) {
     root.appendChild(row2);
   }
 
+  // ---- まとめて記録（棚卸・納品） ----
+
+  /** まとめての動きと表の数を消す（種類を変えたとき・まとめての記録ができたとき・続けて記録するとき）。 */
+  function resetBatch() {
+    batch.kind = state.kind;
+    batch.move = '';
+    batch.texts = Object.create(null);
+    batch.entries = [];
+  }
+
+  /** いまの種類の品目を表の順に並べた行（[{ item, text }]）。 */
+  function batchRows() {
+    var rows = [];
+    currentGroups().forEach(function (g) {
+      g.items.forEach(function (e) {
+        rows.push({ item: e.item, text: Object.prototype.hasOwnProperty.call(batch.texts, e.item) ? batch.texts[e.item] : '' });
+      });
+    });
+    return rows;
+  }
+
+  function batchState() {
+    return stockBatchEntries(batchRows(), batch.move);
+  }
+
+  function batchReady(s) {
+    return state.kind !== null && batch.move !== '' && s.entries.length >= 1 && s.entries.length <= STOCK_BATCH_MAX && s.invalid.length === 0;
+  }
+
+  function batchNote(move) {
+    if (move === 'in') return T.batchNoteIn;
+    if (move === 'out') return T.batchNoteOut;
+    return T.batchNoteCount;
+  }
+
+  function updateBatchRowError(area, item) {
+    while (area.firstChild) area.removeChild(area.firstChild);
+    var text = Object.prototype.hasOwnProperty.call(batch.texts, item) ? batch.texts[item] : '';
+    if (stockBatchEntries([{ item: item, text: text }], batch.move).invalid.length === 1) {
+      area.appendChild(el('p', 'status error', batch.move === 'count' ? T.errorCount : T.errorInOut));
+    }
+  }
+
+  /** 帯の文と「確認へ」の disabled を作り直す（帯の中の段のボタンはそのまま使う）。 */
+  function updateBatchBar(bar, row, toConfirm) {
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    var s = batchState();
+    if (batch.move !== '') {
+      bar.appendChild(el('p', 'note', T.batchCountHead + s.entries.length + T.orderCountTail));
+      if (s.invalid.length >= 1) bar.appendChild(el('p', 'status error', T.batchInvalidHead + s.invalid.length + T.orderCountTail));
+    }
+    toConfirm.disabled = !batchReady(s);
+    bar.appendChild(row);
+  }
+
+  /** 一覧のデータでまとめての画面を始め直す（種類は残す。動きと数は消す）。 */
+  function useListBatch(data) {
+    var kinds = stockRecordKinds(data);
+    if (kinds.length === 0) {
+      showMessage(T.titleRecord, T.noRecordable);
+      return;
+    }
+    state.name = data.name;
+    state.kinds = kinds;
+    if (state.kind !== null && findKind(state.kind) === null) {
+      state.kind = null;
+      state.group = null;
+    }
+    if (state.kinds.length === 1) state.kind = state.kinds[0].kind;
+    if (state.kind === null) state.group = null;
+    settleGroup();
+    state.item = null;
+    state.move = '';
+    state.countText = '';
+    state.count = null;
+    resetBatch();
+    renderBatch();
+  }
+
+  /** まとめての画面（読んである一覧のデータを使う。読み直さない）。 */
+  function renderBatch() {
+    toConfirmButton = null;
+    if (batch.kind !== state.kind) resetBatch();
+    clear(T.titleRecord);
+    root.appendChild(el('p', 'name', state.name + T.nameSuffix));
+
+    if (state.kinds.length >= 2) {
+      var kindCard = el('div', 'card');
+      kindCard.appendChild(el('h2', 'heading', T.kindHeading));
+      var kindChoices = el('div', 'choices');
+      state.kinds.forEach(function (k) {
+        kindChoices.appendChild(choiceButton(k.kind, state.kind === k.kind, function () {
+          if (state.kind === k.kind) return;
+          state.kind = k.kind;
+          state.group = null;
+          settleGroup();
+          state.item = null;
+          state.move = '';
+          state.countText = '';
+          resetBatch();
+          renderBatch();
+        }));
+      });
+      kindCard.appendChild(kindChoices);
+      root.appendChild(kindCard);
+    } else if (state.kind !== null) {
+      root.appendChild(el('p', 'note', T.kindPrefix + state.kind));
+    }
+
+    var bar = el('div', 'actions');
+    var row = el('div', 'action-row');
+    var toConfirm = button(T.toConfirm, 'send', function () {
+      var s = batchState();
+      if (!batchReady(s)) return;
+      batch.entries = s.entries;
+      renderBatchConfirm();
+    });
+    row.appendChild(toConfirm);
+    row.appendChild(button(T.batchOne, 'reset', function () {
+      settleGroup();
+      state.item = null;
+      state.move = '';
+      state.countText = '';
+      state.count = null;
+      renderSelect();
+    }));
+
+    if (currentKind() !== null) {
+      var moveCard = el('div', 'card');
+      moveCard.appendChild(el('h2', 'heading', T.moveHeading));
+      var moveChoices = el('div', 'choices');
+      STOCK_MOVES.forEach(function (m) {
+        moveChoices.appendChild(choiceButton(stockMoveLabel(m), batch.move === m, function () {
+          if (batch.move === m) return;
+          batch.move = m;
+          renderBatch();
+        }));
+      });
+      moveCard.appendChild(moveChoices);
+      root.appendChild(moveCard);
+
+      if (batch.move !== '') {
+        var unit = currentUnit();
+        root.appendChild(el('p', 'note', batchNote(batch.move)));
+        currentGroups().forEach(function (g) {
+          if (g.items.length === 0) return;
+          var card = el('div', 'card');
+          card.appendChild(el('h2', 'heading', g.label + T.unitOpen + unit + T.unitClose));
+          g.items.forEach(function (e) {
+            var line = el('div');
+            var r = el('div', 'action-row');
+            r.style.alignItems = 'center';
+            var name = el('p', 'name', e.item + '\n' + T.nowPrefix + (e.stock === null ? T.none : e.stock + unit));
+            name.style.flex = '1 1 0';
+            var input = el('input', 'stock-batch-count');
+            input.type = 'text';
+            input.inputMode = 'numeric';
+            input.setAttribute('inputmode', 'numeric');
+            input.pattern = '[0-9]*';
+            input.autocomplete = 'off';
+            input.maxLength = 3;
+            input.setAttribute('aria-label', e.item + T.batchLabelTail);
+            input.style.width = '96px';
+            input.style.height = '48px';
+            input.style.fontSize = '18px';
+            input.style.flex = '0 0 96px';
+            input.style.scrollMarginBottom = '200px';
+            input.value = Object.prototype.hasOwnProperty.call(batch.texts, e.item) ? batch.texts[e.item] : '';
+            var errorArea = el('div');
+            input.addEventListener('input', function () {
+              batch.texts[e.item] = String(input.value);
+              updateBatchRowError(errorArea, e.item);
+              updateBatchBar(bar, row, toConfirm);
+            });
+            r.appendChild(name);
+            r.appendChild(input);
+            line.appendChild(r);
+            line.appendChild(errorArea);
+            updateBatchRowError(errorArea, e.item);
+            card.appendChild(line);
+          });
+          root.appendChild(card);
+        });
+      }
+    }
+
+    updateBatchBar(bar, row, toConfirm);
+    root.appendChild(bar);
+  }
+
+  function renderBatchConfirm() {
+    clear(T.titleRecord);
+    var unit = currentUnit();
+    var lines = [state.kind, stockMoveLabel(batch.move) + ' ' + batch.entries.length + T.orderCountTail];
+    batch.entries.forEach(function (x) {
+      var entry = findEntry(x.item);
+      var stock = entry !== null ? entry.stock : null;
+      lines.push(T.batchBullet + x.item + ' ' + x.count + unit + T.batchExpectedOpen + stockExpected(stock, batch.move, x.count) + unit + T.unitClose);
+    });
+    var card = el('div', 'card');
+    card.appendChild(el('h2', 'heading', T.batchConfirm));
+    card.appendChild(el('p', 'result', lines.join('\n')));
+    root.appendChild(card);
+    var bar = el('div', 'actions');
+    var row = el('div', 'action-row');
+    var send = button(T.batchSend, 'send', function () {
+      if (state.sending) return;
+      state.sending = true;
+      send.disabled = true;
+      back.disabled = true;
+      bar.appendChild(el('p', 'status', T.sending));
+      post(stockBatchBody(idToken, state.kind, batch.move, batch.entries)).then(function (r) {
+        state.sending = false;
+        renderBatchResult(r);
+      }).catch(function () {
+        state.sending = false;
+        renderBatchResult({ ok: false });
+      });
+    });
+    var back = button(T.back, 'reset', function () {
+      if (state.sending) return;
+      renderBatch();
+    });
+    row.appendChild(send);
+    row.appendChild(back);
+    bar.appendChild(row);
+    root.appendChild(bar);
+  }
+
+  function renderBatchResult(r) {
+    clear(T.titleRecord);
+    var ok = r.ok && stockIsBatchOk(r.data);
+    if (ok) {
+      var d = r.data;
+      resetBatch();
+      root.appendChild(el('p', 'result', d.message));
+      var orders = d.results.filter(function (x) { return x.order; }).length;
+      if (orders >= 1) root.appendChild(el('p', 'status error', T.orderCountHead + orders + T.orderCountTail));
+      if (d.results.some(function (x) { return x.stock < 0; })) root.appendChild(el('p', 'status error', T.negative));
+      var card = el('div', 'card');
+      card.appendChild(el('h2', 'heading', T.batchAfter));
+      d.results.forEach(function (x) {
+        card.appendChild(itemRow({ item: x.item, stock: x.stock, order: x.order }, d.unit, x.order || x.stock < 0));
+      });
+      root.appendChild(card);
+    } else if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+      root.appendChild(el('p', 'result', r.data.message));
+    } else {
+      root.appendChild(el('p', 'status error', T.sendUnknown));
+    }
+    var row1 = el('div', 'action-row result-actions');
+    if (ok) {
+      row1.appendChild(button(T.again, 'again', function () {
+        loadList(T.titleRecord, useListBatch);
+      }));
+    } else {
+      row1.appendChild(button(T.batchBackToInput, 'again', renderBatch));
+    }
+    row1.appendChild(button(T.openList, 'again', openList));
+    root.appendChild(row1);
+    var row2 = el('div', 'action-row result-actions');
+    row2.appendChild(button(T.cancelOpen, 'reset', openCancelList));
+    row2.appendChild(closeButton());
+    root.appendChild(row2);
+  }
+
   // ---- 在庫を見る ----
 
   function openList() {
@@ -627,7 +993,7 @@ function stockAppStart(root, config, idToken, mode) {
           card.appendChild(el('p', 'note', T.groupMark + g.label));
           g.items.forEach(function (e) {
             var warn = e.order || (e.stock !== null && e.stock < 0);
-            card.appendChild(el('p', warn ? 'status error' : 'name', stockItemLine(e, k.unit)));
+            card.appendChild(itemRow(e, k.unit, warn));
           });
         });
       }
