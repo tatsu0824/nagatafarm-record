@@ -123,8 +123,9 @@ var REQUEST_NOTICE_PREFIX = '【依頼】';
 /** 除草の依頼・依頼の取り消しの画面の文（T27 と同じ文は RECORD_APP_TEXT・RECORD_APP_CANCEL_TEXT を使う）。 */
 var RECORD_APP_REQUEST_TEXT = {
   heading: '除草の依頼',
-  note: '選んだ場所を地図で赤（今すぐ！）にし、毎日の自動通知にも出します。手段・状態は選ばなくてかまいません。誰かがその場所を記録すると自動で解除されます',
+  note: '依頼する場所を選んで「除草して！」を押してください。選んだ場所は地図で赤（今すぐ！）になり、毎日の自動通知にも出ます。誰かがその場所を記録すると自動で解除されます',
   open: '除草して！',
+  pageOpen: '除草を依頼する',
   cancelOpen: '依頼を取り消す',
   noticeInfo: 'グループのトークから開いたときだけ、グループに【依頼】を送ります',
   confirm: 'この場所の除草を依頼しますか？',
@@ -553,7 +554,7 @@ function recordAppStart_() {
   var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
     drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false,
     request: false, requesting: false, requestMine: [], requestCancelling: false, requestees: null, requestFrom: '', requestTo: '',
-    mapUrl: null, mapError: '' };
+    mapUrl: null, mapError: '', requestSelected: [] };
   /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
   var sendButton = null;
 
@@ -836,6 +837,16 @@ function recordAppStart_() {
       root.appendChild(mapRow);
     }
     if (state.mapError !== '') root.appendChild(el('p', 'status error', state.mapError));
+    if (state.request) {
+      var requestRow = el('div', 'action-row');
+      var requestPageOpen = button(RECORD_APP_REQUEST_TEXT.pageOpen, 'again request-page-open', function () {
+        if (state.sending) return;
+        openRequestPage();
+      });
+      requestPageOpen.disabled = state.sending;
+      requestRow.appendChild(requestPageOpen);
+      root.appendChild(requestRow);
+    }
 
     var placeCard = el('div', 'card card-place');
     root.appendChild(placeCard);
@@ -897,7 +908,6 @@ function recordAppStart_() {
       renderDetails(detailsCard);
     }
 
-    if (state.request) renderRequestCard();
     root.appendChild(el('p', 'note', T.noticeInfo));
 
     var bar = el('div', 'actions');
@@ -1189,19 +1199,45 @@ function recordAppStart_() {
 
   // ---- 除草の依頼 ----
 
-  /** 選ぶ画面の依頼のカード（FORM に request: true があるときだけ。最後のカードの直後に置く）。 */
-  function renderRequestCard() {
+  /** 記録画面の「除草を依頼する」から依頼の画面を開く（依頼の選択は毎回空から。記録画面の選択は変えない）。 */
+  function openRequestPage() {
+    state.requestSelected = [];
+    renderRequestPage();
+  }
+
+  /** 依頼の側から記録画面に戻る（依頼の選択だけを外す。記録画面の選択・入力・エラーの文はそのまま。FORM を送り直さない）。 */
+  function backFromRequest() {
+    state.requestSelected = [];
+    renderSelect();
+  }
+
+  /** 依頼の画面（場所を選んで「除草して！」。選択は state.requestSelected に持つ）。 */
+  function renderRequestPage() {
     var TR = RECORD_APP_REQUEST_TEXT;
+    clear();
     var card = el('div', 'card card-request');
     root.appendChild(card);
     card.appendChild(el('h2', 'heading', TR.heading));
     card.appendChild(el('p', 'note', TR.note));
+    state.groups.forEach(function (g) {
+      if (g.locations.length === 0) return;
+      card.appendChild(el('h3', 'group-label', g.label));
+      var box = el('div', 'choices');
+      g.locations.forEach(function (loc) {
+        box.appendChild(choiceButton(loc, state.requestSelected.indexOf(loc) >= 0, function () {
+          if (state.sending) return;
+          state.requestSelected = toggleLocation(state.requestSelected, loc);
+          renderRequestPage();
+        }));
+      });
+      card.appendChild(box);
+    });
     var row = el('div', 'action-row');
     var open = button(TR.open, 'again request-open', function () {
-      if (state.sending || state.selected.length === 0) return;
+      if (state.sending || state.requestSelected.length === 0) return;
       renderRequestConfirm();
     });
-    open.disabled = state.sending || state.selected.length === 0;
+    open.disabled = state.sending || state.requestSelected.length === 0;
     row.appendChild(open);
     var cancelOpen = button(TR.cancelOpen, 'again request-cancel-open', function () {
       if (state.sending) return;
@@ -1211,6 +1247,7 @@ function recordAppStart_() {
     row.appendChild(cancelOpen);
     card.appendChild(row);
     card.appendChild(el('p', 'note', TR.noticeInfo));
+    root.appendChild(requestBackRow());
   }
 
   /**
@@ -1219,7 +1256,7 @@ function recordAppStart_() {
    */
   function renderRequestConfirm() {
     var TR = RECORD_APP_REQUEST_TEXT;
-    var locations = orderedSelection(state.groups, state.selected);
+    var locations = orderedSelection(state.groups, state.requestSelected);
     var persons = state.requestees !== null;
     var fromInput = null;
     var toInput = null;
@@ -1289,7 +1326,7 @@ function recordAppStart_() {
     var row = el('div', 'action-row');
     var no = button(TC.no, 'reset request-no', function () {
       if (state.requesting) return;
-      renderSelect();
+      renderRequestPage();
     });
     var yes = button(TR.yes, 'send request-yes', function () {
       if (state.requesting) return;
@@ -1325,7 +1362,7 @@ function recordAppStart_() {
 
   function requestResultRow() {
     var row = el('div', 'action-row result-actions');
-    row.appendChild(button(TC.back, 'reset request-back', backToRecord));
+    row.appendChild(button(TC.back, 'reset request-back', backFromRequest));
     row.appendChild(button(T.close, 'close', function () {
       liff.closeWindow();
     }));
@@ -1372,7 +1409,7 @@ function recordAppStart_() {
 
   function requestBackRow() {
     var row = el('div', 'action-row');
-    row.appendChild(button(TC.back, 'reset request-back', backToRecord));
+    row.appendChild(button(TC.back, 'reset request-back', backFromRequest));
     return row;
   }
 
@@ -1442,7 +1479,7 @@ function recordAppStart_() {
   function requestCancelResultRow() {
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(TC.more, 'again request-cancel-more', openRequestList));
-    row.appendChild(button(TC.back, 'reset request-back', backToRecord));
+    row.appendChild(button(TC.back, 'reset request-back', backFromRequest));
     row.appendChild(button(T.close, 'close', function () {
       liff.closeWindow();
     }));
