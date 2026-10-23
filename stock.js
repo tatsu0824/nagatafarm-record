@@ -112,7 +112,24 @@ var STOCK_APP_TEXT = {
   janNotListed: 'この品目は画面の一覧にありません。画面を開き直してください',
   janPickHeading: '当てはまる品目を選んでください',
   janOtherKind: 'いまの種類にない品目：',
-  listSep: '、'
+  listSep: '、',
+  janTablePreparing: '照合の準備中…',
+  janTableFailed: '照合表を読めませんでした。1件ずつ照会します（少し時間がかかります）',
+  regNote: 'バーコードを続けて読めます。読むたびに下の一覧に足されます',
+  regPlus: ' ＋1（',
+  regHeading: '読んだ品目',
+  regEmpty: 'まだありません',
+  regRemove: '消す',
+  regCheckHeading: '確かめてください',
+  regToRecord: '記録へ',
+  regKindOpen: '「',
+  regKindMid: '」の品目です。一覧は「',
+  regKindTail: '」の品目だけまとめて記録できます：',
+  regQuitAsk: '読んだ一覧を消してやめますか？',
+  regQuitYes: '消してやめる',
+  regQuitNo: '続ける',
+  regAgain: '続けて読む',
+  regBackToList: '一覧に戻る'
 };
 
 /** まとめての記録で一度に送れる品目の上限。 */
@@ -135,6 +152,23 @@ var STOCK_SCAN_LIB_SRI = 'sha384-BzBxP10ZE72aitqj5UMmUsbKFliP/DZqA8Wq+BNNhlIJDGo
 /** ライブラリの読み込みの待ち時間と、カメラで読み続ける時間（ミリ秒）。 */
 var STOCK_SCAN_LIB_TIMEOUT_MS = 15000;
 var STOCK_SCAN_TIMEOUT_MS = 60000;
+
+/** 読めた後に次の読み取りを始めるまでの待ち時間（ZXing の BrowserMultiFormatReader の2つ目の引数。ミリ秒）。 */
+var STOCK_SCAN_BETWEEN_MS = 100;
+
+/** 続けて読む画面で、同じ JAN をもう1回数えるまでに空ける時間（ミリ秒）。 */
+var STOCK_SCAN_SAME_MS = 1500;
+
+/** 対応表を受け取る前に読んだ JAN を溜める数と、確かめてくださいの項目の上限。 */
+var STOCK_SCAN_QUEUE_MAX = 20;
+var STOCK_SCAN_CHECK_MAX = 20;
+
+/** JAN の対応表の要素の上限（GAS と同じ）。 */
+var STOCK_JAN_TABLE_MAX = 1000;
+
+/** 読めたときの音（方形波の周波数 Hz・長さ ms・音量）と振動。 */
+var STOCK_BEEP_GOOD = { freq: 1000, ms: 80, gain: 0.1, vibrate: 40 };
+var STOCK_BEEP_WARN = { freq: 400, ms: 200, gain: 0.1, vibrate: [40, 60, 40] };
 
 /**
  * URL のクエリから在庫の画面の種類を読む（app.js の readGoMap と同じ読み方）。
@@ -431,6 +465,45 @@ function stockIsJanOk(data) {
   return c.length === 0;
 }
 
+function stockJanTableBody(idToken) {
+  return { action: 'stockJanTable', idToken: idToken };
+}
+
+/**
+ * STOCK_JAN_TABLE_OK の形なら true。entries は長さ 0〜1000 の配列で、各要素に result: 'ok' を足すと stockIsJanOk が真、
+ * status が unknown でなく、jan が重ならないこと。例外を投げない。
+ */
+function stockIsJanTableOk(data) {
+  try {
+    if (!stockIsObject_(data) || data.result !== 'ok') return false;
+    var list = data.entries;
+    if (!Array.isArray(list) || list.length > STOCK_JAN_TABLE_MAX) return false;
+    var seen = Object.create(null);
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (!stockIsObject_(e) || !stockIsJanOk(Object.assign({}, e, { result: 'ok' })) || e.status === 'unknown') return false;
+      if (seen[e.jan] === true) return false;
+      seen[e.jan] = true;
+    }
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
+/** 形が正しければ JAN → { jan, status, message, candidates } の表（Object.create(null)。写しを入れる）。正しくなければ null。入力を変えない。 */
+function stockJanTableMap(data) {
+  if (!stockIsJanTableOk(data)) return null;
+  var map = Object.create(null);
+  data.entries.forEach(function (e) {
+    map[e.jan] = {
+      jan: e.jan, status: e.status, message: e.message,
+      candidates: e.candidates.map(function (c) { return { kind: c.kind, item: c.item }; })
+    };
+  });
+  return map;
+}
+
 /**
  * 在庫の画面を root の中に作る（ブラウザだけで使う）。mode は 'stock'（在庫を記録）か 'stocklist'（在庫を見る）。
  * app.js の関数・状態は使わない。
@@ -447,7 +520,11 @@ function stockAppStart(root, config, idToken, mode) {
   /** まとめての画面の品目ごとの数の欄（探して選んだときにフォーカスを移す）。 */
   var batchInputs = Object.create(null);
   /** バーコードの読み取り（ライブラリの読み込みの状態・読み込みを待つ関数・いまのカメラ・開いた元の画面）。 */
-  var scan = { lib: '', waiters: [], cur: null, origin: 'one' };
+  var scan = { lib: '', waiters: [], cur: null, origin: 'one', audio: null, audioTried: false };
+  /** JAN の対応表（state は ''・loading・ok・failed）と、受け取る前に読んだ JAN・照会中の JAN。この画面の間だけ持つ。 */
+  var jt = { state: '', map: null, queue: [], inflight: Object.create(null) };
+  /** 続けて読む画面（一覧の種類・行・確かめてください・JAN ごとの最後に読めた時刻・動き・送る entries・いまの画面の部品）。 */
+  var reg = { kind: null, rows: [], checks: [], last: Object.create(null), gen: 0, move: '', entries: [], view: null, beeped: null };
 
   function el(tag, className, text) {
     var e = document.createElement(tag);
@@ -470,6 +547,7 @@ function stockAppStart(root, config, idToken, mode) {
   }
 
   function clear(title) {
+    reg.view = null;
     while (root.firstChild) root.removeChild(root.firstChild);
     document.title = title;
     root.appendChild(el('h1', 'title', title));
@@ -1036,13 +1114,30 @@ function stockAppStart(root, config, idToken, mode) {
   }
 
   function renderBatchConfirm() {
+    renderEntriesConfirm(state.kind, batch.move, batch.entries, renderBatch, renderBatchResult);
+  }
+
+  /** その種類の品目の行（読んである一覧）。なければ null。 */
+  function kindEntry(kind, item) {
+    var k = findKind(kind);
+    if (k === null) return null;
+    for (var i = 0; i < k.groups.length; i++) {
+      var items = k.groups[i].items;
+      for (var j = 0; j < items.length; j++) if (items[j].item === item) return items[j];
+    }
+    return null;
+  }
+
+  /** まとめての確認の画面（まとめて・続けて読むの両方で使う）。送った結果は onResult(r)。 */
+  function renderEntriesConfirm(kind, move, entries, onBack, onResult) {
     clear(T.titleRecord);
-    var unit = currentUnit();
-    var lines = [state.kind, stockMoveLabel(batch.move) + ' ' + batch.entries.length + T.orderCountTail];
-    batch.entries.forEach(function (x) {
-      var entry = findEntry(x.item);
+    var k = findKind(kind);
+    var unit = k !== null ? k.unit : '';
+    var lines = [kind, stockMoveLabel(move) + ' ' + entries.length + T.orderCountTail];
+    entries.forEach(function (x) {
+      var entry = kindEntry(kind, x.item);
       var stock = entry !== null ? entry.stock : null;
-      lines.push(T.batchBullet + x.item + ' ' + x.count + unit + T.batchExpectedOpen + stockExpected(stock, batch.move, x.count) + unit + T.unitClose);
+      lines.push(T.batchBullet + x.item + ' ' + x.count + unit + T.batchExpectedOpen + stockExpected(stock, move, x.count) + unit + T.unitClose);
     });
     var card = el('div', 'card');
     card.appendChild(el('h2', 'heading', T.batchConfirm));
@@ -1056,17 +1151,17 @@ function stockAppStart(root, config, idToken, mode) {
       send.disabled = true;
       back.disabled = true;
       bar.appendChild(el('p', 'status', T.sending));
-      post(stockBatchBody(idToken, state.kind, batch.move, batch.entries)).then(function (r) {
+      post(stockBatchBody(idToken, kind, move, entries)).then(function (r) {
         state.sending = false;
-        renderBatchResult(r);
+        onResult(r);
       }).catch(function () {
         state.sending = false;
-        renderBatchResult({ ok: false });
+        onResult({ ok: false });
       });
     });
     var back = button(T.back, 'reset', function () {
       if (state.sending) return;
-      renderBatch();
+      onBack();
     });
     row.appendChild(send);
     row.appendChild(back);
@@ -1075,11 +1170,35 @@ function stockAppStart(root, config, idToken, mode) {
   }
 
   function renderBatchResult(r) {
+    var ok = renderEntriesResult(r);
+    if (ok) resetBatch();
+    var row1 = el('div', 'action-row result-actions');
+    if (ok) {
+      row1.appendChild(button(T.again, 'again', function () {
+        loadList(T.titleRecord, useListBatch);
+      }));
+    } else {
+      row1.appendChild(button(T.batchBackToInput, 'again', renderBatch));
+    }
+    resultRows(row1);
+  }
+
+  /** 結果の画面の1段目（row1 に在庫を見るを足す）と2段目（記録を取り消す・閉じる）。 */
+  function resultRows(row1) {
+    row1.appendChild(button(T.openList, 'again', openList));
+    root.appendChild(row1);
+    var row2 = el('div', 'action-row result-actions');
+    row2.appendChild(button(T.cancelOpen, 'reset', openCancelList));
+    row2.appendChild(closeButton());
+    root.appendChild(row2);
+  }
+
+  /** まとめての結果の画面のボタンより上（まとめて・続けて読むの両方で使う）。記録できたら true。 */
+  function renderEntriesResult(r) {
     clear(T.titleRecord);
     var ok = r.ok && stockIsBatchOk(r.data);
     if (ok) {
       var d = r.data;
-      resetBatch();
       root.appendChild(el('p', 'result', d.message));
       var orders = d.results.filter(function (x) { return x.order; }).length;
       if (orders >= 1) root.appendChild(el('p', 'status error', T.orderCountHead + orders + T.orderCountTail));
@@ -1095,20 +1214,7 @@ function stockAppStart(root, config, idToken, mode) {
     } else {
       root.appendChild(el('p', 'status error', T.sendUnknown));
     }
-    var row1 = el('div', 'action-row result-actions');
-    if (ok) {
-      row1.appendChild(button(T.again, 'again', function () {
-        loadList(T.titleRecord, useListBatch);
-      }));
-    } else {
-      row1.appendChild(button(T.batchBackToInput, 'again', renderBatch));
-    }
-    row1.appendChild(button(T.openList, 'again', openList));
-    root.appendChild(row1);
-    var row2 = el('div', 'action-row result-actions');
-    row2.appendChild(button(T.cancelOpen, 'reset', openCancelList));
-    row2.appendChild(closeButton());
-    root.appendChild(row2);
+    return ok;
   }
 
   // ---- 品目名で探す ----
@@ -1166,8 +1272,14 @@ function stockAppStart(root, config, idToken, mode) {
     row.appendChild(button(T.scanOpen, 'again', function () {
       if (opened) return;
       opened = true;
-      scan.origin = mode;
-      renderScan();
+      prepareAudio();
+      loadJanTable();
+      if (mode === 'batch') {
+        scan.origin = 'batch';
+        renderScan();
+      } else {
+        renderRegister();
+      }
     }));
     card.appendChild(row);
     if (search.flash !== '') {
@@ -1213,6 +1325,7 @@ function stockAppStart(root, config, idToken, mode) {
   /** 読み取り・番号・結果の画面から、開いた元の画面（1つずつ／まとめて）に戻る。選択・探す文字・表の数はそのまま。 */
   function backToOrigin() {
     if (scan.origin === 'batch') renderBatch();
+    else if (scan.origin === 'reg') renderRegister();
     else renderSelect();
   }
 
@@ -1287,33 +1400,601 @@ function stockAppStart(root, config, idToken, mode) {
     scanError(s, stockScanErrorKind(err) === 'denied' ? T.scanDenied : T.scanFailed);
   }
 
-  /** 60秒読めないとき：カメラを止め、文を出し、ボタンの段に「もう一度読む」を足す。 */
+  /**
+   * 60秒読めないとき：カメラを止め、文を出し、ボタンの段に「もう一度読む」を足す。
+   * 続けて読む画面では、段の「記録へ」を残し、「番号を入れる」の前に足す（一覧・確かめてくださいは残す）。
+   */
   function scanTimeout(s) {
     if (s.stopped) return;
     scanError(s, T.scanTimeout);
-    while (s.row.firstChild) s.row.removeChild(s.row.firstChild);
     var again = false;
-    s.row.appendChild(button(T.scanAgain, 'again', function () {
+    var b = button(T.scanAgain, 'again', function () {
       if (again) return;
       again = true;
-      renderScan();
-    }));
+      if (s.reg) renderRegister();
+      else renderScan();
+    });
+    if (s.reg) {
+      s.row.insertBefore(b, s.manual);
+      return;
+    }
+    while (s.row.firstChild) s.row.removeChild(s.row.firstChild);
+    s.row.appendChild(b);
     s.row.appendChild(s.manual);
     s.row.appendChild(s.cancel);
   }
 
-  /** 読み取りの結果。正しい JAN コードのときだけ受け付け、すぐカメラを止めて照会する（1回だけ）。 */
+  /**
+   * 読み取りの結果。正しい JAN コードのときだけ受け付ける。続けて読む画面では読み続ける。
+   * まとめての画面では、すぐカメラを止めて引く（1回だけ）。
+   */
   function onScanResult(s, result) {
     if (s.stopped || result === null || typeof result !== 'object') return;
     var text = typeof result.getText === 'function' ? result.getText() : result.text;
     var c = stockJanCheck(text);
     if (c.jan === null) return;
+    if (s.reg) {
+      regRead(s, c.jan);
+      return;
+    }
     stopScan(s);
     s.status.className = 'status';
     s.status.textContent = T.janSending;
     s.manual.disabled = true;
     s.cancel.disabled = true;
-    sendJan(c.jan);
+    if (sendJan(c.jan, true) === 'wait') s.status.textContent = T.janTablePreparing;
+  }
+
+  /** カメラが映ったときの状態の文（対応表を受け取れなかったときは、その文を p.note で出す）。 */
+  function scanIdle(s) {
+    if (jt.state === 'failed') {
+      s.status.className = 'note';
+      s.status.textContent = T.janTableFailed;
+    } else {
+      s.status.className = 'status';
+      s.status.textContent = '';
+    }
+  }
+
+  /** カメラの映像の要素。 */
+  function scanVideo(maxHeight) {
+    var video = document.createElement('video');
+    video.setAttribute('playsinline', '');
+    video.muted = true;
+    video.autoplay = true;
+    video.style.width = '100%';
+    video.style.maxHeight = maxHeight;
+    return video;
+  }
+
+  // ---- 音・振動 ----
+
+  /** 音を鳴らすための AudioContext を1つだけ作る（バーコードを読むを押した操作の中で呼ぶ）。作れなければ音なしで続ける。 */
+  function prepareAudio() {
+    if (scan.audioTried) return;
+    scan.audioTried = true;
+    try {
+      var Ctor = typeof AudioContext === 'function' ? AudioContext : (typeof webkitAudioContext === 'function' ? webkitAudioContext : null);
+      if (Ctor === null) return;
+      scan.audio = new Ctor();
+      if (typeof scan.audio.resume === 'function') {
+        var p = scan.audio.resume();
+        if (p && typeof p.then === 'function') p.then(null, function () {});
+      }
+    } catch (e) {
+      scan.audio = null;
+    }
+  }
+
+  /** よい音（good が真）か注意の音を鳴らし、振動させる。どちらも失敗は無視する。 */
+  function beep(good) {
+    var b = good ? STOCK_BEEP_GOOD : STOCK_BEEP_WARN;
+    var a = scan.audio;
+    if (a !== null) {
+      try {
+        var osc = a.createOscillator();
+        var gain = a.createGain();
+        osc.type = 'square';
+        osc.frequency.value = b.freq;
+        gain.gain.value = b.gain;
+        osc.connect(gain);
+        gain.connect(a.destination);
+        var t = a.currentTime;
+        osc.start(t);
+        osc.stop(t + b.ms / 1000);
+      } catch (e) {
+        // 鳴らせなくても続ける
+      }
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator && typeof navigator.vibrate === 'function') navigator.vibrate(b.vibrate);
+    } catch (e) {
+      // 振動できなくても続ける
+    }
+  }
+
+  // ---- JAN の対応表で引く ----
+
+  /** 対応表を受け取る（受け取り中・受け取った後は送らない。受け取れなかったときは、次に押したときに送り直す）。 */
+  function loadJanTable() {
+    if (jt.state === 'loading' || jt.state === 'ok') return;
+    jt.state = 'loading';
+    post(stockJanTableBody(idToken)).then(janTableDone).catch(function () {
+      janTableDone({ ok: false });
+    });
+  }
+
+  /** 対応表の応答。溜めた JAN を読んだ順に引く。 */
+  function janTableDone(r) {
+    if (jt.state !== 'loading') return;
+    var map = r.ok ? stockJanTableMap(r.data) : null;
+    jt.map = map;
+    jt.state = map !== null ? 'ok' : 'failed';
+    var s = scan.cur;
+    if (s !== null && !s.stopped && (jt.state === 'failed' || s.status.textContent === T.janTablePreparing)) scanIdle(s);
+    var list = jt.queue;
+    jt.queue = [];
+    list.forEach(function (q) { lookupJan(q.jan, q.done, q.onQuery, q.owner); });
+  }
+
+  /**
+   * JAN を引く。表を受け取る前は溜める（'wait'）。表にあれば通信せずに done を呼ぶ（'hit'）。
+   * 表にない・表を受け取れなかったときは stockJan で照会する（'query'。照会の前に onQuery を呼ぶ）。
+   * done には stockJan の応答と同じ形（{ ok, data }）を渡す。
+   */
+  function lookupJan(jan, done, onQuery, owner) {
+    if (jt.state === 'loading') {
+      jt.queue.push({ jan: jan, done: done, onQuery: onQuery, owner: owner });
+      if (jt.queue.length > STOCK_SCAN_QUEUE_MAX) jt.queue.shift();
+      return 'wait';
+    }
+    var e = jt.map !== null ? jt.map[jan] : undefined;
+    if (e !== undefined) {
+      done({ ok: true, data: { result: 'ok', jan: e.jan, status: e.status, message: e.message, candidates: e.candidates } });
+      return 'hit';
+    }
+    if (typeof onQuery === 'function') onQuery();
+    queryJan(jan, done);
+    return 'query';
+  }
+
+  /** stockJan で照会する。同じ JAN の照会は同時に1つだけ（応答をそれぞれの done に渡す）。 */
+  function queryJan(jan, done) {
+    var waiting = jt.inflight[jan];
+    if (waiting !== undefined) {
+      waiting.push(done);
+      return;
+    }
+    jt.inflight[jan] = [done];
+    var finish = function (r) {
+      var list = jt.inflight[jan];
+      if (list === undefined) return;
+      delete jt.inflight[jan];
+      list.forEach(function (f) { f(r); });
+    };
+    post(stockJanBody(idToken, jan)).then(finish).catch(function () {
+      finish({ ok: false });
+    });
+  }
+
+  // ---- 続けて読む（レジ） ----
+
+  function regRowOf(item) {
+    for (var i = 0; i < reg.rows.length; i++) if (reg.rows[i].item === item) return reg.rows[i];
+    return null;
+  }
+
+  function regInvalid(x) {
+    return stockParseCount(x.text, 'in') === null;
+  }
+
+  function regReady() {
+    return reg.rows.length >= 1 && reg.rows.length <= STOCK_BATCH_MAX && !reg.rows.some(regInvalid);
+  }
+
+  /**
+   * 一覧・確かめてください・動き・JAN ごとの最後に読めた時刻・表を待っている読み取りの溜めを消す。
+   * 番号（gen）を進めるので、この後に届いた照会の応答や、表の到着による溜めの処理は一覧に足さない。対応表はそのまま持つ。
+   */
+  function regReset() {
+    jt.queue = jt.queue.filter(function (q) { return q.owner !== 'reg'; });
+    reg.kind = null;
+    reg.rows = [];
+    reg.checks = [];
+    reg.last = Object.create(null);
+    reg.gen++;
+    reg.move = '';
+    reg.entries = [];
+  }
+
+  /** 続けて読む画面（説明・カメラ・状態の文・読んだ品目・確かめてください・帯）。一覧はそのまま使い、カメラを起動する。 */
+  function renderRegister() {
+    if (scan.cur !== null) stopScan(scan.cur);
+    scan.origin = 'reg';
+    toConfirmButton = null;
+    clear(T.titleRecord);
+    root.appendChild(el('p', 'note', T.regNote));
+    var area = el('div');
+    var video = scanVideo('35vh');
+    area.appendChild(video);
+    root.appendChild(area);
+    var status = el('p', 'status', T.scanPreparing);
+    root.appendChild(status);
+    var listCard = el('div', 'card');
+    root.appendChild(listCard);
+    var bar = el('div', 'actions');
+    var countNote = el('p', 'note', '');
+    var row = el('div', 'action-row');
+    var s = { video: video, status: status, row: row, manual: null, cancel: null, stream: null, reader: null, timer: null, stopped: false, reg: true };
+    var v = { s: s, listCard: listCard, heading: null, empty: null, rows: Object.create(null), checkCard: el('div', 'card'), bar: bar,
+      countNote: countNote, send: null, quit: false };
+    v.send = button(T.regToRecord, 'send', function () {
+      if (!regReady()) return;
+      stopScan(s);
+      reg.entries = reg.rows.map(function (x) { return { item: x.item, count: stockParseCount(x.text, 'in') }; });
+      reg.move = '';
+      renderRegMove();
+    });
+    s.manual = button(T.scanManual, 'again', function () {
+      stopScan(s);
+      renderJanInput();
+    });
+    s.cancel = button(T.cancelNo, 'reset', function () {
+      if (reg.rows.length === 0 && reg.checks.length === 0) {
+        regReset();
+        stopScan(s);
+        renderSelect();
+        return;
+      }
+      regAskQuit(v);
+    });
+    row.appendChild(v.send);
+    row.appendChild(s.manual);
+    row.appendChild(s.cancel);
+    bar.appendChild(countNote);
+    bar.appendChild(row);
+    root.appendChild(bar);
+    reg.view = v;
+    regBuildList(v);
+    regShowChecks();
+    regUpdateBar();
+    scan.cur = s;
+    startScan(s);
+  }
+
+  /** やめるで一覧か確かめてくださいがあるとき：帯の中で確かめる（カメラはそのまま）。 */
+  function regAskQuit(v) {
+    if (v.quit) return;
+    v.quit = true;
+    var msg = el('p', 'message', T.regQuitAsk);
+    var row = el('div', 'action-row');
+    row.appendChild(button(T.regQuitYes, 'reset', function () {
+      regReset();
+      stopScan(v.s);
+      renderSelect();
+    }));
+    row.appendChild(button(T.regQuitNo, 'again', function () {
+      v.bar.removeChild(msg);
+      v.bar.removeChild(row);
+      v.quit = false;
+    }));
+    v.bar.appendChild(msg);
+    v.bar.appendChild(row);
+  }
+
+  /** 読んだ品目のカードを作る。 */
+  function regBuildList(v) {
+    var card = v.listCard;
+    while (card.firstChild) card.removeChild(card.firstChild);
+    v.heading = el('h2', 'heading', '');
+    card.appendChild(v.heading);
+    v.empty = el('p', 'note', T.regEmpty);
+    v.rows = Object.create(null);
+    if (reg.rows.length === 0) card.appendChild(v.empty);
+    reg.rows.forEach(function (x) { regAppendRow(v, x); });
+    regUpdateHeading(v);
+  }
+
+  /** 読んだ品目の1行（品目・数の欄・消す）。数の入力・消すでは画面を作り直さない。 */
+  function regAppendRow(v, x) {
+    var line = el('div', 'action-row');
+    line.style.alignItems = 'center';
+    var name = el('p', 'name', x.item);
+    name.style.flex = '1 1 0';
+    var input = el('input', 'stock-scan-count');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.setAttribute('inputmode', 'numeric');
+    input.pattern = '[0-9]*';
+    input.autocomplete = 'off';
+    input.maxLength = 3;
+    input.setAttribute('aria-label', x.item + T.batchLabelTail);
+    input.style.width = '96px';
+    input.style.height = '48px';
+    input.style.fontSize = '18px';
+    input.style.flex = '0 0 96px';
+    input.style.scrollMarginBottom = '200px';
+    input.value = x.text;
+    input.addEventListener('input', function () {
+      x.text = String(input.value);
+      regRowError(v, x);
+      regUpdateBar();
+    });
+    var remove = button(T.regRemove, 'reset', function () {
+      regRemoveRow(x);
+    });
+    remove.style.flex = '0 0 auto';
+    line.appendChild(name);
+    line.appendChild(input);
+    line.appendChild(remove);
+    v.listCard.appendChild(line);
+    v.rows[x.item] = { line: line, input: input, error: null };
+    regRowError(v, x);
+  }
+
+  /** 行の下のエラーの文を出す・消す。 */
+  function regRowError(v, x) {
+    var ui = v.rows[x.item];
+    if (ui === undefined) return;
+    var bad = regInvalid(x);
+    if (bad && ui.error === null) {
+      ui.error = el('p', 'status error', T.errorInOut);
+      v.listCard.insertBefore(ui.error, ui.line.nextSibling);
+    } else if (!bad && ui.error !== null) {
+      v.listCard.removeChild(ui.error);
+      ui.error = null;
+    }
+  }
+
+  function regRemoveRow(x) {
+    var i = reg.rows.indexOf(x);
+    if (i < 0) return;
+    reg.rows.splice(i, 1);
+    if (reg.rows.length === 0) reg.kind = null;
+    var v = reg.view;
+    if (v === null) return;
+    var ui = v.rows[x.item];
+    if (ui !== undefined) {
+      v.listCard.removeChild(ui.line);
+      if (ui.error !== null) v.listCard.removeChild(ui.error);
+      delete v.rows[x.item];
+    }
+    if (reg.rows.length === 0) v.listCard.appendChild(v.empty);
+    regUpdateHeading(v);
+    regUpdateBar();
+  }
+
+  function regUpdateHeading(v) {
+    v.heading.textContent = reg.rows.length === 0 ? T.regHeading : T.regHeading + T.unitOpen + reg.kind + T.unitClose;
+  }
+
+  /** 帯の品目の数と「記録へ」の disabled。 */
+  function regUpdateBar() {
+    var v = reg.view;
+    if (v === null) return;
+    v.countNote.textContent = reg.rows.length + T.orderCountTail;
+    v.send.disabled = !regReady();
+  }
+
+  /** 状態の文（カメラが止まった後は変えない）。 */
+  function regStatus(text) {
+    var v = reg.view;
+    if (v === null || v.s.stopped) return;
+    v.s.status.className = 'status';
+    v.s.status.textContent = text;
+  }
+
+  /** 一覧に足す（あれば数 +1。999 で止める）。 */
+  function regAdd(hit) {
+    if (reg.rows.length === 0) reg.kind = hit.kind;
+    var v = reg.view;
+    var x = regRowOf(hit.item);
+    var n;
+    if (x === null) {
+      x = { item: hit.item, text: '1' };
+      n = 1;
+      reg.rows.push(x);
+      if (v !== null) {
+        if (v.empty.parentNode === v.listCard) v.listCard.removeChild(v.empty);
+        regAppendRow(v, x);
+      }
+    } else {
+      var c = stockParseCount(x.text, 'in');
+      n = Math.min((c === null ? 0 : c) + 1, 999);
+      x.text = String(n);
+      if (v !== null && v.rows[x.item] !== undefined) {
+        v.rows[x.item].input.value = x.text;
+        regRowError(v, x);
+      }
+    }
+    if (v !== null) {
+      regUpdateHeading(v);
+      regUpdateBar();
+    }
+    regStatus(x.item + T.regPlus + n + T.unitClose);
+  }
+
+  /** 確かめてくださいの項目を置く（同じ JAN は置き換える。最大20で古いものを消す）。 */
+  function regSetCheck(jan, c) {
+    c.jan = jan;
+    for (var i = 0; i < reg.checks.length; i++) {
+      if (reg.checks[i].jan === jan) {
+        reg.checks[i] = c;
+        return;
+      }
+    }
+    reg.checks.push(c);
+    if (reg.checks.length > STOCK_SCAN_CHECK_MAX) reg.checks.shift();
+  }
+
+  function regDropCheck(jan) {
+    reg.checks = reg.checks.filter(function (c) { return c.jan !== jan; });
+  }
+
+  /** 確かめてくださいのカードを作り直す（項目がなければ外す）。 */
+  function regShowChecks() {
+    var v = reg.view;
+    if (v === null) return;
+    var card = v.checkCard;
+    while (card.firstChild) card.removeChild(card.firstChild);
+    if (reg.checks.length === 0) {
+      if (card.parentNode === root) root.removeChild(card);
+      return;
+    }
+    card.appendChild(el('h2', 'heading', T.regCheckHeading));
+    reg.checks.forEach(function (c) { card.appendChild(regCheckEl(c)); });
+    if (card.parentNode !== root) root.insertBefore(card, v.bar);
+  }
+
+  function regCheckEl(c) {
+    var d = el('div');
+    if (c.type === 'pending') {
+      d.appendChild(el('p', 'note', T.janSending));
+      return d;
+    }
+    if (c.type === 'pick') {
+      d.appendChild(el('p', 'result', c.message));
+      if (c.hits.length >= 1) {
+        var choices = el('div', 'choices');
+        c.hits.forEach(function (hit) {
+          choices.appendChild(choiceButton(hitText(hit, 'one'), false, function () {
+            regUseHit(c.jan, hit);
+          }));
+        });
+        d.appendChild(choices);
+      }
+    } else {
+      d.appendChild(el('p', 'status error', c.text));
+    }
+    d.appendChild(button(T.regRemove, 'reset', function () {
+      regDropCheck(c.jan);
+      regShowChecks();
+    }));
+    return d;
+  }
+
+  /** 品目を一覧に足す（一覧と違う種類なら確かめてくださいに出す）。足せたら true。 */
+  function regUseHit(jan, hit) {
+    if (reg.rows.length >= 1 && hit.kind !== reg.kind) {
+      regSetCheck(jan, { type: 'error', text: T.regKindOpen + hit.kind + T.regKindMid + reg.kind + T.regKindTail + hit.item });
+      regShowChecks();
+      return false;
+    }
+    regDropCheck(jan);
+    regAdd(hit);
+    regShowChecks();
+    return true;
+  }
+
+  /** 引いた結果（stockJan の応答と同じ形）を一覧か確かめてくださいに入れ、音を鳴らす（続けて読む画面が出ているときだけ）。 */
+  function regApply(jan, r) {
+    var good = false;
+    if (r.ok && stockIsJanOk(r.data)) {
+      var d = r.data;
+      var listed = [];
+      d.candidates.forEach(function (c) {
+        var hit = findListed(c.kind, c.item);
+        if (hit !== null) listed.push(hit);
+      });
+      if (d.status !== 'one' && d.status !== 'pick') {
+        regSetCheck(jan, { type: 'error', text: d.message });
+      } else if (listed.length === 0) {
+        regSetCheck(jan, { type: 'error', text: T.janNotListed });
+      } else if (d.status === 'one') {
+        good = regUseHit(jan, listed[0]);
+      } else {
+        regSetCheck(jan, { type: 'pick', message: d.message, hits: listed.filter(function (hit) {
+          return reg.rows.length === 0 || hit.kind === reg.kind;
+        }) });
+      }
+    } else if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+      regSetCheck(jan, { type: 'error', text: r.data.message });
+    } else {
+      regSetCheck(jan, { type: 'error', text: T.janFailed });
+    }
+    regShowChecks();
+    // 照会の応答1つにつき1回だけ鳴らす（照会中に同じ JAN を何回数えても、同じ応答のオブジェクトが来る）
+    if (reg.view !== null && reg.beeped !== r) {
+      reg.beeped = r;
+      beep(good);
+    }
+  }
+
+  /**
+   * 続けて読む画面で読めた JAN：60秒を延ばし、同じ JAN は最後に読めてから 1.5秒以上たったときだけ数える。
+   * 表で引き、なければ照会する（照会中は確かめてくださいに照会中…）。
+   */
+  function regRead(s, jan) {
+    if (s.timer !== null) clearTimeout(s.timer);
+    s.timer = setTimeout(function () { scanTimeout(s); }, STOCK_SCAN_TIMEOUT_MS);
+    var now = Date.now();
+    var prev = reg.last[jan];
+    reg.last[jan] = now;
+    if (prev !== undefined && now - prev < STOCK_SCAN_SAME_MS) return;
+    var gen = reg.gen;
+    var how = lookupJan(jan, function (r) {
+      if (gen === reg.gen) regApply(jan, r);
+    }, function () {
+      if (gen !== reg.gen) return;
+      regSetCheck(jan, { type: 'pending' });
+      regShowChecks();
+    }, 'reg');
+    if (how === 'wait') regStatus(T.janTablePreparing);
+  }
+
+  /** 記録への後の動きの画面。 */
+  function renderRegMove() {
+    clear(T.titleRecord);
+    root.appendChild(el('p', 'note', T.kindPrefix + reg.kind));
+    var card = el('div', 'card');
+    card.appendChild(el('h2', 'heading', T.moveHeading));
+    var choices = el('div', 'choices');
+    STOCK_MOVES.forEach(function (m) {
+      choices.appendChild(choiceButton(stockMoveLabel(m), reg.move === m, function () {
+        if (reg.move === m) return;
+        reg.move = m;
+        renderRegMove();
+      }));
+    });
+    card.appendChild(choices);
+    if (reg.move !== '') card.appendChild(el('p', 'note', moveNote(reg.move)));
+    root.appendChild(card);
+    var bar = el('div', 'actions');
+    var row = el('div', 'action-row');
+    var go = button(T.toConfirm, 'send', function () {
+      if (reg.move === '') return;
+      renderEntriesConfirm(reg.kind, reg.move, reg.entries, renderRegMove, renderRegResult);
+    });
+    go.disabled = reg.move === '';
+    row.appendChild(go);
+    row.appendChild(button(T.back, 'reset', function () {
+      renderRegister();
+    }));
+    bar.appendChild(row);
+    root.appendChild(bar);
+  }
+
+  /** 続けて読むの結果（記録できたら一覧を消す）。 */
+  function renderRegResult(r) {
+    var ok = renderEntriesResult(r);
+    var row1 = el('div', 'action-row result-actions');
+    if (ok) {
+      r.data.results.forEach(function (x) {
+        var entry = kindEntry(r.data.kind, x.item);
+        if (entry === null) return;
+        entry.stock = x.stock;
+        entry.order = x.order;
+      });
+      regReset();
+      row1.appendChild(button(T.regAgain, 'again', function () {
+        renderRegister();
+      }));
+    } else {
+      row1.appendChild(button(T.regBackToList, 'again', function () {
+        renderRegister();
+      }));
+    }
+    resultRows(row1);
   }
 
   function startScan(s) {
@@ -1341,11 +2022,11 @@ function stockAppStart(root, config, idToken, mode) {
         }
         s.stream = stream;
         s.video.srcObject = stream;
-        s.status.textContent = '';
+        scanIdle(s);
         s.timer = setTimeout(function () { scanTimeout(s); }, STOCK_SCAN_TIMEOUT_MS);
         var hints = new Map();
         hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
-        s.reader = new ZXing.BrowserMultiFormatReader(hints);
+        s.reader = new ZXing.BrowserMultiFormatReader(hints, STOCK_SCAN_BETWEEN_MS);
         var d = s.reader.decodeFromVideoElementContinuously(s.video, function (result) {
           onScanResult(s, result);
         });
@@ -1364,12 +2045,7 @@ function stockAppStart(root, config, idToken, mode) {
     clear(T.titleRecord);
     root.appendChild(el('p', 'note', T.scanNote));
     var area = el('div');
-    var video = document.createElement('video');
-    video.setAttribute('playsinline', '');
-    video.muted = true;
-    video.autoplay = true;
-    video.style.width = '100%';
-    video.style.maxHeight = '50vh';
+    var video = scanVideo('50vh');
     area.appendChild(video);
     root.appendChild(area);
     var status = el('p', 'status', T.scanPreparing);
@@ -1438,17 +2114,32 @@ function stockAppStart(root, config, idToken, mode) {
     update();
   }
 
-  /** JAN コードを照会する（本文は1回だけ送る）。 */
-  function sendJan(jan) {
-    if (state.sending) return;
+  /**
+   * JAN コードを引く（表で引き、なければ照会する。本文は1回だけ送る）。戻り値は lookupJan と同じ。
+   * 続けて読む画面から来たときは、結果を一覧か確かめてくださいに入れて、続けて読む画面に戻る。
+   * sound が真（まとめての画面のカメラで読んだとき）は、その品目の行へ移れるならよい音、ほかは注意の音を鳴らす。
+   */
+  function sendJan(jan, sound) {
+    if (state.sending) return '';
     state.sending = true;
-    post(stockJanBody(idToken, jan)).then(function (r) {
+    var origin = scan.origin;
+    return lookupJan(jan, function (r) {
       state.sending = false;
+      if (origin === 'reg') {
+        regApply(jan, r);
+        renderRegister();
+        return;
+      }
+      if (sound === true) beep(janGoesToRow(r));
       renderJanResult(r);
-    }).catch(function () {
-      state.sending = false;
-      renderJanResult({ ok: false });
-    });
+    }, null);
+  }
+
+  /** まとめての画面で、その結果がいまの種類の品目の行へ移るもの（one で一覧にある）なら true。 */
+  function janGoesToRow(r) {
+    if (!r.ok || !stockIsJanOk(r.data) || r.data.status !== 'one') return false;
+    var hit = findListed(r.data.candidates[0].kind, r.data.candidates[0].item);
+    return hit !== null && hit.kind === state.kind;
   }
 
   /** 結果の画面の「もう一度読む」と「戻る」。 */
