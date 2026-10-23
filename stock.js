@@ -1,7 +1,9 @@
 /*
  * 記録画面（LIFF）の在庫の画面。?go=stock（在庫を記録）・?go=stocklist（在庫を見る）で app.js から呼ばれる。
  * 種類・単位・品目・区分・残りの数は毎回 GAS（?route=stock）から受け取る（このファイルに品目名・種類名・単位などの現場の情報を書かない）。
- * 表示はすべて createElement と textContent で作る。キーボードを出す要素は数の入力欄だけ。
+ * 表示はすべて createElement と textContent で作る。キーボードを出す要素は、数の入力欄・品目名で探す欄・JAN コードの番号の欄だけ。
+ * 在庫を記録の画面には、品目名で探す欄と、カメラで JAN コード（13けたのバーコード）を読む機能を置く。
+ * バーコードを読むライブラリ（ZXing）は、初めて読むときに1回だけ、版を固定し SRI を付けて読む（このフォルダーに置かない）。
  * グループには何も送らない。読み込んだだけでは何もしない（app.js が stockAppStart を呼ぶ）。
  */
 
@@ -83,7 +85,34 @@ var STOCK_APP_TEXT = {
   batchSend: 'まとめて記録する',
   batchAfter: '記録後の残り',
   batchBackToInput: '入力に戻る',
-  batchLabelTail: 'の数'
+  batchLabelTail: 'の数',
+  searchHeading: '品目を探す',
+  searchLabel: '品目名の一部',
+  searchNote: '名前の一部で探せます（ひらがな・カタカナ、英数字の全角・半角のどちらでも）',
+  searchNone: '当てはまる品目がありません',
+  searchMoreHead: 'ほか ',
+  searchMoreTail: '件。もう少し詳しく入れてください',
+  scanOpen: 'バーコードを読む',
+  scanNote: 'JAN コード（13けたのバーコード）をカメラに写してください。読めると自動で次へ進みます',
+  scanPreparing: 'カメラを準備しています…',
+  scanManual: '番号を入れる',
+  scanAgain: 'もう一度読む',
+  scanNoCamera: 'この画面ではカメラを使えません。「番号を入れる」で JAN の数字を入れてください',
+  scanDenied: 'カメラの使用が許可されていません。LINE アプリにカメラの使用を許可するか、「番号を入れる」で JAN の数字を入れてください',
+  scanLibFailed: '読み取りの準備ができませんでした。電波のよい所でもう一度お試しいただくか、「番号を入れる」で JAN の数字を入れてください',
+  scanFailed: 'カメラを起動できませんでした。「番号を入れる」で JAN の数字を入れてください',
+  scanTimeout: '読み取れませんでした。明るい所でバーコードを大きく写すか、「番号を入れる」で JAN の数字を入れてください',
+  janNote: 'JAN コード（バーコードの下の13けたの数字）を入れてください',
+  janLabel: 'JAN コード',
+  janErrorDigits: '13けたの数字で入れてください',
+  janErrorCheck: 'JAN コードが正しくありません。数字を確かめてください',
+  janSend: '照会する',
+  janSending: '照会中…',
+  janFailed: '照会できませんでした。電波のよい所でもう一度お試しください',
+  janNotListed: 'この品目は画面の一覧にありません。画面を開き直してください',
+  janPickHeading: '当てはまる品目を選んでください',
+  janOtherKind: 'いまの種類にない品目：',
+  listSep: '、'
 };
 
 /** まとめての記録で一度に送れる品目の上限。 */
@@ -91,6 +120,21 @@ var STOCK_BATCH_MAX = 200;
 
 /** 動きの値（GAS の move と同じ）。この順にボタンを並べる。 */
 var STOCK_MOVES = ['in', 'out', 'count'];
+
+/** 品目名で探すときに出す品目の上限。 */
+var STOCK_SEARCH_MAX = 20;
+
+/** JAN コードの照会の応答の status と、候補の上限（GAS と同じ）。 */
+var STOCK_JAN_STATUSES = ['one', 'pick', 'unknown', 'not_in_sheet'];
+var STOCK_JAN_MAX_CANDIDATES = 20;
+
+/** バーコードを読むライブラリ（ZXing 0.21.3。jsDelivr から版を固定し、SRI を付けて読む）。 */
+var STOCK_SCAN_LIB_URL = 'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js';
+var STOCK_SCAN_LIB_SRI = 'sha384-BzBxP10ZE72aitqj5UMmUsbKFliP/DZqA8Wq+BNNhlIJDGoEd1tpkMYXOg9+n6sB';
+
+/** ライブラリの読み込みの待ち時間と、カメラで読み続ける時間（ミリ秒）。 */
+var STOCK_SCAN_LIB_TIMEOUT_MS = 15000;
+var STOCK_SCAN_TIMEOUT_MS = 60000;
 
 /**
  * URL のクエリから在庫の画面の種類を読む（app.js の readGoMap と同じ読み方）。
@@ -297,6 +341,97 @@ function stockIsBatchOk(data) {
 }
 
 /**
+ * 品目名で探すときのキー。NFKC にし、ひらがな（U+3041〜U+3096）をカタカナにし、大文字にし、空白類をすべて除く。
+ * 入力と品目名の両方に同じキーを使う。文字列でなければ ''。
+ */
+function stockSearchKey(text) {
+  if (typeof text !== 'string') return '';
+  var s = text.normalize('NFKC');
+  var out = '';
+  for (var i = 0; i < s.length; i++) {
+    var c = s.charCodeAt(i);
+    out += c >= 0x3041 && c <= 0x3096 ? String.fromCharCode(c + 0x60) : s.charAt(i);
+  }
+  return out.toUpperCase().replace(/\s+/g, '');
+}
+
+/**
+ * 品目名のキーが入力のキーを含む品目を、種類の順・区分の順・品目の順に返す（{ hits: [{ kind, group, item }], more }）。
+ * kinds は stockRecordKinds の形。more は limit を超えた数。キーが空なら何も返さない。形の違う要素は飛ばす。入力を変えない。例外を投げない。
+ */
+function stockSearchItems(kinds, text, limit) {
+  var out = { hits: [], more: 0 };
+  try {
+    var key = stockSearchKey(text);
+    if (key === '' || !Array.isArray(kinds)) return out;
+    var max = typeof limit === 'number' && Number.isInteger(limit) && limit >= 1 ? limit : STOCK_SEARCH_MAX;
+    kinds.forEach(function (k) {
+      if (!stockIsObject_(k) || typeof k.kind !== 'string' || k.kind.length < 1 || !Array.isArray(k.groups)) return;
+      k.groups.forEach(function (g) {
+        if (!stockIsObject_(g) || typeof g.label !== 'string' || !Array.isArray(g.items)) return;
+        g.items.forEach(function (e) {
+          if (!stockIsObject_(e) || typeof e.item !== 'string' || e.item.length < 1) return;
+          if (stockSearchKey(e.item).indexOf(key) < 0) return;
+          if (out.hits.length < max) out.hits.push({ kind: k.kind, group: g.label, item: e.item });
+          else out.more++;
+        });
+      });
+    });
+    return out;
+  } catch (err) {
+    return { hits: [], more: 0 };
+  }
+}
+
+/** カメラの起動の失敗の種類。許可されないときは denied、ほか（形の違うものも）は failed。 */
+function stockScanErrorKind(err) {
+  try {
+    if (err !== null && typeof err === 'object') {
+      var n = err.name;
+      if (n === 'NotAllowedError' || n === 'SecurityError' || n === 'PermissionDeniedError') return 'denied';
+    }
+  } catch (e) {
+    return 'failed';
+  }
+  return 'failed';
+}
+
+/**
+ * JAN コードの入力を読む（{ jan, error }）。NFKC・前後の空白除きで、空か12けた以下の数字は打っている途中（error は空）。
+ * 13けたの数字でチェックデジットが正しければ jan、違えば error は check。ほか（数字でない字・14けた以上）は digits。
+ */
+function stockJanCheck(text) {
+  if (typeof text !== 'string') return { jan: null, error: '' };
+  var s = text.normalize('NFKC').trim();
+  if (s === '' || /^[0-9]{1,12}$/.test(s)) return { jan: null, error: '' };
+  if (!/^[0-9]{13}$/.test(s)) return { jan: null, error: 'digits' };
+  var sum = 0;
+  for (var i = 0; i < 12; i++) sum += Number(s.charAt(i)) * (i % 2 === 0 ? 1 : 3);
+  if (Number(s.charAt(12)) !== (10 - (sum % 10)) % 10) return { jan: null, error: 'check' };
+  return { jan: s, error: '' };
+}
+
+function stockJanBody(idToken, jan) {
+  return { action: 'stockJan', idToken: idToken, jan: jan };
+}
+
+/** STOCK_JAN_OK の形なら true（候補の数は status ごとの決まりに合うこと）。 */
+function stockIsJanOk(data) {
+  if (!stockIsObject_(data) || data.result !== 'ok') return false;
+  if (typeof data.jan !== 'string' || !/^[0-9]{13}$/.test(data.jan)) return false;
+  if (STOCK_JAN_STATUSES.indexOf(data.status) < 0 || typeof data.message !== 'string') return false;
+  var c = data.candidates;
+  if (!Array.isArray(c) || c.length > STOCK_JAN_MAX_CANDIDATES) return false;
+  var shaped = c.every(function (x) {
+    return stockIsObject_(x) && typeof x.kind === 'string' && x.kind.length >= 1 && typeof x.item === 'string' && x.item.length >= 1;
+  });
+  if (!shaped) return false;
+  if (data.status === 'one') return c.length === 1;
+  if (data.status === 'pick') return c.length >= 1;
+  return c.length === 0;
+}
+
+/**
  * 在庫の画面を root の中に作る（ブラウザだけで使う）。mode は 'stock'（在庫を記録）か 'stocklist'（在庫を見る）。
  * app.js の関数・状態は使わない。
  */
@@ -307,6 +442,12 @@ function stockAppStart(root, config, idToken, mode) {
   var batch = { kind: null, move: '', texts: Object.create(null), entries: [] };
   /** いま出ている「確認へ」のボタン（数の入力のたびに disabled だけを更新する）。 */
   var toConfirmButton = null;
+  /** 品目名で探す文字（1つずつ・まとめて）と、JAN コードで選んだ直後に1回だけ出す文。 */
+  var search = { one: '', batch: '', flash: '' };
+  /** まとめての画面の品目ごとの数の欄（探して選んだときにフォーカスを移す）。 */
+  var batchInputs = Object.create(null);
+  /** バーコードの読み取り（ライブラリの読み込みの状態・読み込みを待つ関数・いまのカメラ・開いた元の画面）。 */
+  var scan = { lib: '', waiters: [], cur: null, origin: 'one' };
 
   function el(tag, className, text) {
     var e = document.createElement(tag);
@@ -503,6 +644,9 @@ function stockAppStart(root, config, idToken, mode) {
     toConfirmButton = null;
     clear(T.titleRecord);
     root.appendChild(el('p', 'name', state.name + T.nameSuffix));
+    root.appendChild(searchCard('one', function (hit) {
+      selectItem(hit.kind, hit.group, hit.item);
+    }));
 
     if (state.kinds.length >= 2) {
       var kindCard = el('div', 'card');
@@ -778,6 +922,7 @@ function stockAppStart(root, config, idToken, mode) {
   /** まとめての画面（読んである一覧のデータを使う。読み直さない）。 */
   function renderBatch() {
     toConfirmButton = null;
+    batchInputs = Object.create(null);
     if (batch.kind !== state.kind) resetBatch();
     clear(T.titleRecord);
     root.appendChild(el('p', 'name', state.name + T.nameSuffix));
@@ -839,6 +984,9 @@ function stockAppStart(root, config, idToken, mode) {
 
       if (batch.move !== '') {
         var unit = currentUnit();
+        root.appendChild(searchCard('batch', function (hit) {
+          focusBatchItem(hit.item);
+        }));
         root.appendChild(el('p', 'note', batchNote(batch.move)));
         currentGroups().forEach(function (g) {
           if (g.items.length === 0) return;
@@ -864,6 +1012,7 @@ function stockAppStart(root, config, idToken, mode) {
             input.style.flex = '0 0 96px';
             input.style.scrollMarginBottom = '200px';
             input.value = Object.prototype.hasOwnProperty.call(batch.texts, e.item) ? batch.texts[e.item] : '';
+            batchInputs[e.item] = input;
             var errorArea = el('div');
             input.addEventListener('input', function () {
               batch.texts[e.item] = String(input.value);
@@ -960,6 +1109,436 @@ function stockAppStart(root, config, idToken, mode) {
     row2.appendChild(button(T.cancelOpen, 'reset', openCancelList));
     row2.appendChild(closeButton());
     root.appendChild(row2);
+  }
+
+  // ---- 品目名で探す ----
+
+  /** 探した品目・JAN コードの候補のボタンの文字。1つずつで使える種類が2つ以上なら種類を添える。 */
+  function hitText(hit, mode) {
+    return mode === 'one' && state.kinds.length >= 2 ? hit.item + T.unitOpen + hit.kind + T.unitClose : hit.item;
+  }
+
+  /** 結果の場所だけを作り直す（mode は one か batch。まとめてでは、いまの種類の品目だけを探す）。 */
+  function renderSearchResults(area, mode, onPick) {
+    while (area.firstChild) area.removeChild(area.firstChild);
+    if (stockSearchKey(search[mode]) === '') return;
+    var k = currentKind();
+    var kinds = mode === 'one' ? state.kinds : (k !== null ? [k] : []);
+    var r = stockSearchItems(kinds, search[mode], STOCK_SEARCH_MAX);
+    if (r.hits.length === 0) {
+      area.appendChild(el('p', 'note', T.searchNone));
+      return;
+    }
+    var choices = el('div', 'choices');
+    r.hits.forEach(function (hit) {
+      choices.appendChild(choiceButton(hitText(hit, mode), false, function () {
+        onPick(hit);
+      }));
+    });
+    area.appendChild(choices);
+    if (r.more >= 1) area.appendChild(el('p', 'note', T.searchMoreHead + r.more + T.searchMoreTail));
+  }
+
+  /** 探すカード（見出し・探す欄・注記・結果の場所・バーコードを読むボタン、JAN コードで選んだ直後だけ応答の文）。 */
+  function searchCard(mode, onPick) {
+    var card = el('div', 'card');
+    card.appendChild(el('h2', 'heading', T.searchHeading));
+    var input = el('input', 'stock-search');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.maxLength = 30;
+    input.setAttribute('aria-label', T.searchLabel);
+    input.style.width = '100%';
+    input.style.height = '48px';
+    input.style.fontSize = '18px';
+    input.value = search[mode];
+    var area = el('div');
+    input.addEventListener('input', function () {
+      search[mode] = String(input.value);
+      renderSearchResults(area, mode, onPick);
+    });
+    card.appendChild(input);
+    card.appendChild(el('p', 'note', T.searchNote));
+    card.appendChild(area);
+    renderSearchResults(area, mode, onPick);
+    var row = el('div', 'action-row');
+    var opened = false;
+    row.appendChild(button(T.scanOpen, 'again', function () {
+      if (opened) return;
+      opened = true;
+      scan.origin = mode;
+      renderScan();
+    }));
+    card.appendChild(row);
+    if (search.flash !== '') {
+      card.appendChild(el('p', 'status', search.flash));
+      search.flash = '';
+    }
+    return card;
+  }
+
+  /** 1つずつの画面で品目を選ぶ（種類が変わったときは、種類のボタンと同じく、まとめての状態を消す）。 */
+  function selectItem(kind, group, item) {
+    if (state.kind !== kind) {
+      state.kind = kind;
+      resetBatch();
+    }
+    state.group = group;
+    state.item = item;
+    state.move = '';
+    state.countText = '';
+    search.one = '';
+    renderSelect();
+  }
+
+  /** まとめての画面で、その品目の数の欄に移る（画面を作り直さない）。 */
+  function focusBatchItem(item) {
+    var input = batchInputs[item];
+    if (input === undefined) return;
+    input.focus();
+    input.scrollIntoView({ block: 'center' });
+  }
+
+  /** 読んである一覧にある品目なら { kind, group, item }、なければ null。 */
+  function findListed(kind, item) {
+    var k = findKind(kind);
+    if (k === null) return null;
+    for (var i = 0; i < k.groups.length; i++) {
+      var items = k.groups[i].items;
+      for (var j = 0; j < items.length; j++) if (items[j].item === item) return { kind: kind, group: k.groups[i].label, item: item };
+    }
+    return null;
+  }
+
+  /** 読み取り・番号・結果の画面から、開いた元の画面（1つずつ／まとめて）に戻る。選択・探す文字・表の数はそのまま。 */
+  function backToOrigin() {
+    if (scan.origin === 'batch') renderBatch();
+    else renderSelect();
+  }
+
+  // ---- バーコードを読む ----
+
+  function scanLibReady() {
+    return typeof ZXing !== 'undefined' && ZXing !== null && typeof ZXing.BrowserMultiFormatReader === 'function' &&
+      ZXing.BarcodeFormat !== undefined && ZXing.DecodeHintType !== undefined;
+  }
+
+  /** ライブラリを読み、done(読めたか) を呼ぶ。読めた後は読み直さない。失敗したら次に呼ばれたときに読み直す。 */
+  function loadScanLib(done) {
+    if (scan.lib === 'ok') {
+      done(true);
+      return;
+    }
+    scan.waiters.push(done);
+    if (scan.lib === 'loading') return;
+    scan.lib = 'loading';
+    var settled = false;
+    var timer = null;
+    var finish = function (ok) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      scan.lib = ok ? 'ok' : '';
+      var list = scan.waiters;
+      scan.waiters = [];
+      list.forEach(function (f) { f(ok); });
+    };
+    var tag = document.createElement('script');
+    tag.onload = function () { finish(scanLibReady()); };
+    tag.onerror = function () { finish(false); };
+    tag.src = STOCK_SCAN_LIB_URL;
+    tag.integrity = STOCK_SCAN_LIB_SRI;
+    tag.crossOrigin = 'anonymous';
+    tag.async = true;
+    timer = setTimeout(function () { finish(false); }, STOCK_SCAN_LIB_TIMEOUT_MS);
+    document.head.appendChild(tag);
+  }
+
+  /** カメラを止める（読み取りのクラスの reset、すべてのトラックの stop、映像を外す、60秒のタイマーを消す）。止めた後の読み取りは捨てる。 */
+  function stopScan(s) {
+    if (s.stopped) return;
+    s.stopped = true;
+    if (scan.cur === s) scan.cur = null;
+    if (s.reader !== null) {
+      try {
+        s.reader.reset();
+      } catch (e) {
+        // 止めるときの例外は無視する（トラックは下で止める）
+      }
+    }
+    stopTracks(s.stream);
+    s.video.srcObject = null;
+    if (s.timer !== null) clearTimeout(s.timer);
+  }
+
+  function stopTracks(stream) {
+    if (stream && typeof stream.getTracks === 'function') stream.getTracks().forEach(function (t) { t.stop(); });
+  }
+
+  /** カメラを止めて、状態の場所に文を出す（ボタンはそのまま）。 */
+  function scanError(s, text) {
+    if (s.stopped) return;
+    stopScan(s);
+    s.status.className = 'status error';
+    s.status.textContent = text;
+  }
+
+  function scanCameraError(s, err) {
+    scanError(s, stockScanErrorKind(err) === 'denied' ? T.scanDenied : T.scanFailed);
+  }
+
+  /** 60秒読めないとき：カメラを止め、文を出し、ボタンの段に「もう一度読む」を足す。 */
+  function scanTimeout(s) {
+    if (s.stopped) return;
+    scanError(s, T.scanTimeout);
+    while (s.row.firstChild) s.row.removeChild(s.row.firstChild);
+    var again = false;
+    s.row.appendChild(button(T.scanAgain, 'again', function () {
+      if (again) return;
+      again = true;
+      renderScan();
+    }));
+    s.row.appendChild(s.manual);
+    s.row.appendChild(s.cancel);
+  }
+
+  /** 読み取りの結果。正しい JAN コードのときだけ受け付け、すぐカメラを止めて照会する（1回だけ）。 */
+  function onScanResult(s, result) {
+    if (s.stopped || result === null || typeof result !== 'object') return;
+    var text = typeof result.getText === 'function' ? result.getText() : result.text;
+    var c = stockJanCheck(text);
+    if (c.jan === null) return;
+    stopScan(s);
+    s.status.className = 'status';
+    s.status.textContent = T.janSending;
+    s.manual.disabled = true;
+    s.cancel.disabled = true;
+    sendJan(c.jan);
+  }
+
+  function startScan(s) {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+      scanError(s, T.scanNoCamera);
+      return;
+    }
+    loadScanLib(function (ok) {
+      if (s.stopped) return;
+      if (!ok) {
+        scanError(s, T.scanLibFailed);
+        return;
+      }
+      var p;
+      try {
+        p = navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' } } });
+      } catch (err) {
+        scanCameraError(s, err);
+        return;
+      }
+      Promise.resolve(p).then(function (stream) {
+        if (s.stopped) {
+          stopTracks(stream);
+          return;
+        }
+        s.stream = stream;
+        s.video.srcObject = stream;
+        s.status.textContent = '';
+        s.timer = setTimeout(function () { scanTimeout(s); }, STOCK_SCAN_TIMEOUT_MS);
+        var hints = new Map();
+        hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
+        s.reader = new ZXing.BrowserMultiFormatReader(hints);
+        var d = s.reader.decodeFromVideoElementContinuously(s.video, function (result) {
+          onScanResult(s, result);
+        });
+        if (d && typeof d.then === 'function') {
+          d.then(null, function (err) { scanCameraError(s, err); });
+        }
+      }).catch(function (err) {
+        scanCameraError(s, err);
+      });
+    });
+  }
+
+  /** 読み取りの画面（説明・カメラの場所・状態の文・番号を入れる／やめる）。 */
+  function renderScan() {
+    if (scan.cur !== null) stopScan(scan.cur);
+    clear(T.titleRecord);
+    root.appendChild(el('p', 'note', T.scanNote));
+    var area = el('div');
+    var video = document.createElement('video');
+    video.setAttribute('playsinline', '');
+    video.muted = true;
+    video.autoplay = true;
+    video.style.width = '100%';
+    video.style.maxHeight = '50vh';
+    area.appendChild(video);
+    root.appendChild(area);
+    var status = el('p', 'status', T.scanPreparing);
+    root.appendChild(status);
+    var row = el('div', 'action-row');
+    var s = { video: video, status: status, row: row, manual: null, cancel: null, stream: null, reader: null, timer: null, stopped: false };
+    s.manual = button(T.scanManual, 'again', function () {
+      stopScan(s);
+      renderJanInput();
+    });
+    s.cancel = button(T.cancelNo, 'reset', function () {
+      stopScan(s);
+      backToOrigin();
+    });
+    row.appendChild(s.manual);
+    row.appendChild(s.cancel);
+    root.appendChild(row);
+    scan.cur = s;
+    startScan(s);
+  }
+
+  // ---- JAN コードの番号・照会の結果 ----
+
+  /** 番号の画面。 */
+  function renderJanInput() {
+    clear(T.titleRecord);
+    root.appendChild(el('p', 'note', T.janNote));
+    var input = el('input', 'stock-jan');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.setAttribute('inputmode', 'numeric');
+    input.pattern = '[0-9]*';
+    input.autocomplete = 'off';
+    input.maxLength = 13;
+    input.setAttribute('aria-label', T.janLabel);
+    input.style.width = '100%';
+    input.style.height = '48px';
+    input.style.fontSize = '18px';
+    var errorArea = el('div');
+    var row = el('div', 'action-row');
+    var send = button(T.janSend, 'send', function () {
+      var c = stockJanCheck(String(input.value));
+      if (c.jan === null || state.sending) return;
+      send.disabled = true;
+      back.disabled = true;
+      root.appendChild(el('p', 'status', T.janSending));
+      sendJan(c.jan);
+    });
+    var back = button(T.back, 'reset', function () {
+      if (state.sending) return;
+      backToOrigin();
+    });
+    var update = function () {
+      var c = stockJanCheck(String(input.value));
+      while (errorArea.firstChild) errorArea.removeChild(errorArea.firstChild);
+      if (c.error === 'digits') errorArea.appendChild(el('p', 'status error', T.janErrorDigits));
+      else if (c.error === 'check') errorArea.appendChild(el('p', 'status error', T.janErrorCheck));
+      send.disabled = c.jan === null;
+    };
+    input.addEventListener('input', update);
+    root.appendChild(input);
+    root.appendChild(errorArea);
+    row.appendChild(send);
+    row.appendChild(back);
+    root.appendChild(row);
+    update();
+  }
+
+  /** JAN コードを照会する（本文は1回だけ送る）。 */
+  function sendJan(jan) {
+    if (state.sending) return;
+    state.sending = true;
+    post(stockJanBody(idToken, jan)).then(function (r) {
+      state.sending = false;
+      renderJanResult(r);
+    }).catch(function () {
+      state.sending = false;
+      renderJanResult({ ok: false });
+    });
+  }
+
+  /** 結果の画面の「もう一度読む」と「戻る」。 */
+  function janRow() {
+    var row = el('div', 'action-row');
+    var again = false;
+    row.appendChild(button(T.scanAgain, 'again', function () {
+      if (again) return;
+      again = true;
+      renderScan();
+    }));
+    row.appendChild(button(T.back, 'reset', backToOrigin));
+    return row;
+  }
+
+  function renderJanMessage(className, text) {
+    clear(T.titleRecord);
+    root.appendChild(el('p', className, text));
+    root.appendChild(janRow());
+  }
+
+  /** 照会で決まった品目を、開いた元の画面で選ぶ（message があれば探すカードに1回だけ出す）。 */
+  function useJanItem(hit, message) {
+    search.flash = message;
+    if (scan.origin === 'batch') {
+      renderBatch();
+      focusBatchItem(hit.item);
+    } else {
+      selectItem(hit.kind, hit.group, hit.item);
+    }
+    search.flash = '';
+  }
+
+  /**
+   * 選ぶ画面。読んである一覧にない候補は除く（何も残らなければ一覧にないの結果の画面）。
+   * まとめてでは、一覧にあっていまの種類と違う候補は文で知らせ、残りをボタンにする。
+   */
+  function renderJanPick(d) {
+    var shown = [];
+    var others = [];
+    d.candidates.forEach(function (c) {
+      var hit = findListed(c.kind, c.item);
+      if (hit === null) return;
+      if (scan.origin === 'batch' && hit.kind !== state.kind) others.push(hit);
+      else shown.push(hit);
+    });
+    if (shown.length === 0 && others.length === 0) {
+      renderJanMessage('status error', T.janNotListed);
+      return;
+    }
+    clear(T.titleRecord);
+    root.appendChild(el('p', 'result', d.message));
+    if (shown.length >= 1) {
+      var card = el('div', 'card');
+      card.appendChild(el('h2', 'heading', T.janPickHeading));
+      var choices = el('div', 'choices');
+      shown.forEach(function (hit) {
+        choices.appendChild(choiceButton(hitText(hit, scan.origin), false, function () {
+          useJanItem(hit, '');
+        }));
+      });
+      card.appendChild(choices);
+      root.appendChild(card);
+    }
+    if (others.length >= 1) {
+      root.appendChild(el('p', 'note', T.janOtherKind + others.map(function (c) {
+        return c.item + T.unitOpen + c.kind + T.unitClose;
+      }).join(T.listSep)));
+    }
+    root.appendChild(janRow());
+  }
+
+  function renderJanResult(r) {
+    if (r.ok && stockIsJanOk(r.data)) {
+      var d = r.data;
+      if (d.status === 'one') {
+        var hit = findListed(d.candidates[0].kind, d.candidates[0].item);
+        if (hit === null) renderJanMessage('status error', T.janNotListed);
+        else if (scan.origin === 'batch' && hit.kind !== state.kind) renderJanPick(d);
+        else useJanItem(hit, d.message);
+      } else if (d.status === 'pick') {
+        renderJanPick(d);
+      } else {
+        renderJanMessage('result', d.message);
+      }
+    } else if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+      renderJanMessage('result', r.data.message);
+    } else {
+      renderJanMessage('status error', T.janFailed);
+    }
   }
 
   // ---- 在庫を見る ----
