@@ -1,7 +1,7 @@
 /*
  * 記録画面（LIFF）。場所を複数ボタンで選び、手段ボタンを1つ選んで送信する。
  * 場所・手段の一覧は毎回 GAS から受け取る（このファイルに農園の情報を書かない）。
- * 表示はすべて createElement と textContent で作る。キーボードを出す要素は倍率の入力欄と、依頼の確認の画面の依頼した人・依頼先の欄だけ（進み具合はスライダー）。
+ * 表示はすべて createElement と textContent で作る。キーボードを出す要素は倍率の入力欄と、依頼の確認の画面の依頼した人・依頼先の欄だけ。
  */
 
 /** グループへ送る文の先頭（Handler.js の無視の条件と同じ文字列）。 */
@@ -82,14 +82,12 @@ var RATIO_MAX = 10000;
 /** 結果・【記録】の行の先頭と接尾辞（RecordForm.js の同名の定数と同じ値）。 */
 var PART_LINE_PREFIX = '部位：';
 var DRUG_LINE_PREFIX = '薬剤：';
-var PROGRESS_LINE_PREFIX = '進み具合：';
 var RATIO_SUFFIX = '倍';
-var PROGRESS_SUFFIX = '%';
 
 /** 前回の記録を出す最大の行数（これを超えた分は「ほか n か所」）。 */
 var PREVIOUS_MAX_LINES = 3;
 
-/** 薬剤・倍率・部位・進み具合・詳しく・前回の記録の画面の文。 */
+/** 薬剤・倍率・部位・詳しく・前回の記録の画面の文。 */
 var RECORD_APP_DETAIL_TEXT = {
   drugHeading: '薬剤',
   ratioHeading: '倍率',
@@ -98,14 +96,7 @@ var RECORD_APP_DETAIL_TEXT = {
   ratioError: '倍率は 1〜10000 の数字で入れてください',
   partHeading: '部位（任意）',
   partNote: '同じ場所でも部位ごとに分けて記録できます（「続けて記録する」で場所は残ります）',
-  progressHeading: '進み具合（任意）',
-  progressLabel: '進み具合',
-  progressNone: '未入力',
-  progressOpen: '進み具合を入れる',
-  progressClear: '未入力に戻す',
-  progressNote: '入れたいときだけ「進み具合を入れる」を押し、バーを動かして、この記録でどのくらい終わったかの感じを記録します。全部終わったときは入れなくてかまいません',
   partItem: '部位',
-  progressItem: '進み具合',
   detailsOpenHead: '詳しく（',
   detailsOpenTail: '）',
   detailsClose: '詳しくを閉じる',
@@ -114,7 +105,7 @@ var RECORD_APP_DETAIL_TEXT = {
   itemJoiner: '・',
   moreHead: 'ほか ',
   moreTail: ' か所',
-  notRecorded: '部位・薬剤・進み具合を記録できていない可能性があります（管理者に連絡してください）'
+  notRecorded: '部位・薬剤を記録できていない可能性があります（管理者に連絡してください）'
 };
 
 /** 除草の依頼をしたときグループへ送る文の先頭（Handler.js の HANDLER_REQUEST_NOTICE_PREFIX_ と同じ値）。 */
@@ -197,7 +188,7 @@ function canSend(selected, method) {
 /**
  * GAS への要求オブジェクト。record で range が長さ1以上の配列のときだけ method の後に range（コピー）を付ける。
  * record で states が長さ1以上の配列のときだけ、その後に states（コピー）を付ける。
- * record で details があれば、その後に part → drug と ratio（両方そろうときだけ）→ progress → previous の順に付ける。
+ * record で details があれば、その後に part → drug と ratio（両方そろうときだけ）→ previous の順に付ける。
  */
 function buildRequest(action, idToken, locations, method, range, states, details) {
   if (action === 'form') return { action: action, idToken: idToken };
@@ -211,28 +202,9 @@ function buildRequest(action, idToken, locations, method, range, states, details
       req.drug = details.drug;
       req.ratio = details.ratio;
     }
-    if (Number.isSafeInteger(details.progress)) req.progress = details.progress;
     if (details.previous === true) req.previous = true;
   }
   return req;
-}
-
-/** 進み具合のバーの範囲と刻み { min, max, step } の形なら true。 */
-function isProgressSpec(p) {
-  if (p === null || typeof p !== 'object' || Array.isArray(p)) return false;
-  if (!Number.isSafeInteger(p.min) || !Number.isSafeInteger(p.max) || !Number.isSafeInteger(p.step)) return false;
-  return p.step >= 1 && p.min < p.max && (p.max - p.min) % p.step === 0;
-}
-
-/** 進み具合が未入力のときのつまみの位置（min と max の真ん中を刻みに丸めた値）。 */
-function progressMiddle(p) {
-  return p.min + Math.round((p.max - p.min) / 2 / p.step) * p.step;
-}
-
-/** 進み具合の文（null → 未入力、整数 → 何 %）。 */
-function progressLabel(value) {
-  if (value === null) return PROGRESS_LINE_PREFIX + RECORD_APP_DETAIL_TEXT.progressNone;
-  return PROGRESS_LINE_PREFIX + value + PROGRESS_SUFFIX;
 }
 
 /** 倍率の入力を整数 1〜10000 に読む（全角数字も可）。読めなければ null。 */
@@ -290,7 +262,6 @@ function buildNoticeText(response) {
   if (typeof response.drug === 'string' && response.drug !== '' && Number.isInteger(response.ratio)) {
     text += '\n' + DRUG_LINE_PREFIX + response.drug + ' ' + response.ratio + RATIO_SUFFIX;
   }
-  if (Number.isSafeInteger(response.progress)) text += '\n' + PROGRESS_LINE_PREFIX + response.progress + PROGRESS_SUFFIX;
   if (recordAppIsStringArray_(response.states) && response.states.length >= 1) {
     text += '\n' + STATE_LINE_PREFIX + response.states.join(STATE_JOINER);
   }
@@ -521,7 +492,6 @@ function recordAppIsForm_(data) {
   if (data.drugMethod !== undefined && typeof data.drugMethod !== 'string') return false;
   if (data.drugs !== undefined && !recordAppIsStringArray_(data.drugs)) return false;
   if (data.parts !== undefined && !recordAppIsStringArray_(data.parts)) return false;
-  if (data.progress !== undefined && !isProgressSpec(data.progress)) return false;
   if (data.previous !== undefined && !recordAppIsPreviousList_(data.previous)) return false;
   if (data.request !== undefined && data.request !== true) return false;
   if (data.requestees !== undefined && (!recordAppIsStringArray_(data.requestees) || data.request !== true)) return false;
@@ -552,7 +522,7 @@ function recordAppStart_() {
   var TS = RECORD_APP_STATE_TEXT;
   var TD = RECORD_APP_DETAIL_TEXT;
   var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
-    drugMethod: '', drugs: [], parts: [], progressSpec: null, previous: null, detailsOpen: false, drug: '', ratioText: '', part: '', progress: null, progressOpen: false,
+    drugMethod: '', drugs: [], parts: [], previous: null, detailsOpen: false, drug: '', ratioText: '', part: '',
     request: false, requesting: false, requestMine: [], requestCancelling: false, requestees: null, requestFrom: '', requestTo: '',
     mapUrl: null, mapError: '', requestSelected: [] };
   /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
@@ -620,9 +590,9 @@ function recordAppStart_() {
     return b;
   }
 
-  /** FORM に部位か進み具合があるとき「詳しく」を使う。 */
+  /** FORM に部位があるとき「詳しく」を使う。 */
   function hasDetails() {
-    return state.parts.length >= 1 || state.progressSpec !== null;
+    return state.parts.length >= 1;
   }
 
   /** 薬剤・倍率の欄を出すか（薬剤の手段が選ばれていて、薬剤の選択肢があるとき）。 */
@@ -645,8 +615,6 @@ function recordAppStart_() {
     state.drug = '';
     state.ratioText = '';
     state.part = '';
-    state.progress = null;
-    state.progressOpen = false;
     state.error = '';
   }
 
@@ -741,60 +709,11 @@ function recordAppStart_() {
     card.appendChild(el('p', 'note', TD.partNote));
   }
 
-  function renderProgress(card) {
-    var spec = state.progressSpec;
-    card.appendChild(el('h2', 'heading', TD.progressHeading));
-    var label = el('p', 'progress-value', progressLabel(state.progress));
-    card.appendChild(label);
-    if (!state.progressOpen) {
-      // スライダーは押したときだけ出す（縦のスワイプで値が入るのを防ぐ）。押しただけでは値を入れない
-      var open = button(TD.progressOpen, 'again progress-open', function () {
-        if (state.sending) return;
-        state.progressOpen = true;
-        renderSelect();
-      });
-      open.disabled = state.sending;
-      card.appendChild(open);
-      card.appendChild(el('p', 'note', TD.progressNote));
-      return;
-    }
-    var slider = el('input', 'progress-bar');
-    slider.type = 'range';
-    slider.min = String(spec.min);
-    slider.max = String(spec.max);
-    slider.step = String(spec.step);
-    slider.setAttribute('aria-label', TD.progressLabel);
-    slider.style.width = '100%';
-    slider.style.height = '48px';
-    slider.value = String(state.progress !== null ? state.progress : progressMiddle(spec));
-    if (state.progress !== null) slider.setAttribute('aria-valuetext', state.progress + PROGRESS_SUFFIX);
-    slider.disabled = state.sending;
-    var clearButton = button(TD.progressClear, 'reset progress-clear', function () {
-      if (state.sending) return;
-      state.progress = null;
-      state.progressOpen = false;
-      renderSelect();
-    });
-    clearButton.disabled = state.sending;
-    slider.addEventListener('input', function () {
-      if (state.sending) return;
-      var v = Number(slider.value);
-      if (!Number.isSafeInteger(v)) return;
-      state.progress = v;
-      label.textContent = progressLabel(v);
-      slider.setAttribute('aria-valuetext', v + PROGRESS_SUFFIX);
-    });
-    card.appendChild(slider);
-    card.appendChild(clearButton);
-    card.appendChild(el('p', 'note', TD.progressNote));
-  }
-
   /** 閉じているときの「詳しく：…」の要約（選んだものがなければ空文字）。 */
   function detailsSummary() {
     var items = [];
     if (state.part !== '') items.push(state.part);
     if (state.range.length >= 1) items.push(state.range.join(TD.itemJoiner));
-    if (state.progress !== null) items.push(state.progress + PROGRESS_SUFFIX);
     return items.length ? TD.summaryPrefix + items.join(TD.summaryJoiner) : '';
   }
 
@@ -802,7 +721,6 @@ function recordAppStart_() {
     var items = [];
     if (state.parts.length >= 1) items.push(TD.partItem);
     items.push(T.rangeHeading);
-    if (state.progressSpec !== null) items.push(TD.progressItem);
     var toggle = button(state.detailsOpen ? TD.detailsClose : TD.detailsOpenHead + items.join(TD.itemJoiner) + TD.detailsOpenTail,
       'again details-toggle', function () {
         if (state.sending) return;
@@ -819,7 +737,6 @@ function recordAppStart_() {
     }
     if (state.parts.length >= 1) renderPart(card);
     renderRange(card);
-    if (state.progressSpec !== null) renderProgress(card);
   }
 
   function renderSelect() {
@@ -965,7 +882,6 @@ function recordAppStart_() {
       details.drug = state.drug;
       details.ratio = parseRatio(state.ratioText);
     }
-    if (state.progress !== null) details.progress = state.progress;
     state.sending = true;
     state.error = '';
     renderSelect();
@@ -1013,11 +929,10 @@ function recordAppStart_() {
     state.previous = next;
   }
 
-  /** 送った部位・薬剤と倍率・進み具合のどれかが応答と一致しなければ true。 */
+  /** 送った部位・薬剤と倍率のどれかが応答と一致しなければ true。 */
   function detailsMissing(sent, data) {
     if (sent.part !== undefined && data.part !== sent.part) return true;
     if (sent.drug !== undefined && (data.drug !== sent.drug || data.ratio !== sent.ratio)) return true;
-    if (sent.progress !== undefined && data.progress !== sent.progress) return true;
     return false;
   }
 
@@ -1535,7 +1450,6 @@ function recordAppStart_() {
       state.drugMethod = typeof data.drugMethod === 'string' ? data.drugMethod : '';
       state.drugs = Array.isArray(data.drugs) ? data.drugs : [];
       state.parts = Array.isArray(data.parts) ? data.parts : [];
-      state.progressSpec = data.progress !== undefined ? data.progress : null;
       state.previous = Array.isArray(data.previous) ? data.previous.slice() : null;
       state.request = data.request === true;
       state.requestees = Array.isArray(data.requestees) ? data.requestees.slice() : null;
@@ -1545,8 +1459,6 @@ function recordAppStart_() {
       state.drug = '';
       state.ratioText = '';
       state.part = '';
-      state.progress = null;
-      state.progressOpen = false;
       state.selected = presetSelection(data.groups, preset);
       state.mapUrl = data.mapUrl !== undefined ? data.mapUrl : null;
       if (goMap === true && state.mapUrl === null) state.mapError = RECORD_APP_MAP_TEXT.missing;
