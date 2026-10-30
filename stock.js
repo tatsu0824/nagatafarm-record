@@ -26,7 +26,7 @@ var STOCK_APP_TEXT = {
   countHeading: '数',
   unitOpen: '（',
   unitClose: '）',
-  nowPrefix: 'いまの残り：',
+  nowPrefix: '残：',
   none: '記録なし',
   moveIn: '入庫',
   moveOut: '出庫',
@@ -129,7 +129,22 @@ var STOCK_APP_TEXT = {
   regQuitYes: '消してやめる',
   regQuitNo: '続ける',
   regAgain: '続けて読む',
-  regBackToList: '一覧に戻る'
+  regBackToList: '一覧に戻る',
+  filterAll: 'すべて',
+  filterOrder: '要発注だけ',
+  openAll: '全部開く',
+  closeAll: '全部閉じる',
+  toggleClosed: '▶ ',
+  toggleOpened: '▼ ',
+  orderSomeHead: '要発注あり（',
+  orderSomeTail: '品目）',
+  orderOnlyNone: '要発注の品目はありません',
+  pendingHead: '入力中 ',
+  pendingNone: '入力中の品目：なし',
+  pendingSep: '：',
+  pendingFix: '数を直してください',
+  moveCountButton: '棚卸（再カウント）',
+  linkMark: ' ↗'
 };
 
 /** まとめての記録で一度に送れる品目の上限。 */
@@ -137,6 +152,15 @@ var STOCK_BATCH_MAX = 200;
 
 /** 動きの値（GAS の move と同じ）。この順にボタンを並べる。 */
 var STOCK_MOVES = ['in', 'out', 'count'];
+
+/** 入庫出庫の画面（まとめて・1つずつ）の動きのボタンの並び（左から）。 */
+var STOCK_MOVE_BUTTONS = ['out', 'in', 'count'];
+
+/** 閉じた区分の見出しの下に出す入力中の品目の行の上限。 */
+var STOCK_FOLD_SUMMARY_MAX = 3;
+
+/** 品目のリンクの URL の長さの上限。 */
+var STOCK_LINK_MAX = 500;
 
 /** 品目名で探すときに出す品目の上限。 */
 var STOCK_SEARCH_MAX = 20;
@@ -420,6 +444,77 @@ function stockSearchItems(kinds, text, limit) {
   }
 }
 
+/**
+ * 品目のリンクの URL を検める。文字列で、長さが 1〜STOCK_LINK_MAX で、https で始まる決まりの形に全体が当たるときだけ、その文字列（変えない）。
+ * ほかは ''。ホストは英数字・点・ハイフンだけ。パス以降は URL に使える記号だけ（空白・引用符・山かっこ・日本語などを含まない）。例外を投げない。
+ */
+function stockLinkUrl(url) {
+  try {
+    if (typeof url !== 'string' || url.length < 1 || url.length > STOCK_LINK_MAX) return '';
+    return /^https:\/\/[A-Za-z0-9.-]+(:[0-9]{1,5})?(\/[A-Za-z0-9\-._~%!$&*+,;=:@\/?#]*)?$/.test(url) ? url : '';
+  } catch (err) {
+    return '';
+  }
+}
+
+/**
+ * 入力中のまとめの1行。row は { item, text }。text が空（文字列でない、または NFKC・前後の空白除きで空）なら ''。
+ * 正しい数なら 品目・区切り・数・単位・動きの語、正しくない数なら 品目・区切り・直してくださいの文。形の違う row は ''。例外を投げない。
+ */
+function stockPendingLine(row, unit, move) {
+  var T = STOCK_APP_TEXT;
+  try {
+    if (!stockIsObject_(row) || typeof row.item !== 'string' || row.item.length < 1) return '';
+    if (typeof row.text !== 'string' || row.text.normalize('NFKC').trim() === '') return '';
+    var n = stockParseCount(row.text, move);
+    if (n === null) return row.item + T.pendingSep + T.pendingFix;
+    return row.item + T.pendingSep + n + (typeof unit === 'string' ? unit : '') + stockMoveLabel(move);
+  } catch (err) {
+    return '';
+  }
+}
+
+/**
+ * 種類の一覧（stockList の kinds の形）の深い写しを、要発注だけ（orderOnly が真）・品目名で探す（text のキーが空でない）で絞る。
+ * 品目が残らない区分・種類は除く。どちらの絞りもなければ全部（設定がまだ・品目なしの種類も）の写し。どちらかの絞りがあれば、
+ * 設定がまだ・品目なしの種類は除く。順は変えない。入力を変えない。形の違う要素は除く。例外を投げない。
+ */
+function stockFilterKinds(kinds, text, orderOnly) {
+  var out = [];
+  try {
+    if (!Array.isArray(kinds)) return out;
+    var key = stockSearchKey(text);
+    var only = orderOnly === true;
+    var narrow = only || key !== '';
+    kinds.forEach(function (k) {
+      if (!stockIsObject_(k) || typeof k.kind !== 'string' || k.kind.length < 1 || !Array.isArray(k.groups)) return;
+      if (narrow && k.ready !== true) return;
+      var groups = [];
+      k.groups.forEach(function (g) {
+        if (!stockIsObject_(g) || typeof g.label !== 'string' || !Array.isArray(g.items)) return;
+        var items = [];
+        g.items.forEach(function (e) {
+          if (!stockIsObject_(e) || typeof e.item !== 'string' || e.item.length < 1) return;
+          if (only && e.order !== true) return;
+          if (key !== '' && stockSearchKey(e.item).indexOf(key) < 0) return;
+          items.push(JSON.parse(JSON.stringify(e)));
+        });
+        if (narrow && items.length === 0) return;
+        var gc = JSON.parse(JSON.stringify(Object.assign({}, g, { items: [] })));
+        gc.items = items;
+        groups.push(gc);
+      });
+      if (narrow && groups.length === 0) return;
+      var kc = JSON.parse(JSON.stringify(Object.assign({}, k, { groups: [] })));
+      kc.groups = groups;
+      out.push(kc);
+    });
+    return out;
+  } catch (err) {
+    return [];
+  }
+}
+
 /** カメラの起動の失敗の種類。許可されないときは denied、ほか（形の違うものも）は failed。 */
 function stockScanErrorKind(err) {
   try {
@@ -528,6 +623,13 @@ function stockAppStart(root, config, idToken, mode) {
   var jt = { state: '', map: null, queue: [], inflight: Object.create(null) };
   /** 続けて読む画面（一覧の種類・行・確かめてください・JAN ごとの最後に読めた時刻・動き・送る entries・いまの画面の部品）。 */
   var reg = { kind: null, rows: [], checks: [], last: Object.create(null), gen: 0, move: '', entries: [], view: null, beeped: null };
+  /** 在庫を見るの画面（データ・探す文字・要発注だけ・開いた種類と区分・帯の部品・本文の要素）。renderList のたびに作り直す。 */
+  var lv = null;
+  /** まとめての画面の開いた区分（区分名ごと）と、入力中のまとめを広げているか。resetBatch で閉じる。 */
+  var batchFold = Object.create(null);
+  var pendingOpen = false;
+  /** まとめての画面の帯の部品と本文の要素（表が出ている間だけ。renderBatch のたびに作り直す）。 */
+  var bv = null;
 
   function el(tag, className, text) {
     var e = document.createElement(tag);
@@ -561,7 +663,65 @@ function stockAppStart(root, config, idToken, mode) {
     root.appendChild(el('p', 'message', text));
   }
 
-  /** 在庫の行（左に品目名と印、右に数）。warn なら赤い太字（既存の status error）。 */
+  /**
+   * 品目名の要素（大きい太字）。品目に検めて正しい url があれば、品目名の文字だけをリンクにする。
+   * リンクを押すと既定の動きを止め、LIFF で端末のブラウザに開く（LIFF の画面は残る）。開けなくても画面はそのまま。
+   */
+  function itemNameEl(entry) {
+    var url = stockLinkUrl(entry.url);
+    var name;
+    if (url === '') {
+      name = el('span', '', entry.item);
+    } else {
+      name = document.createElement('a');
+      name.textContent = entry.item + T.linkMark;
+      name.setAttribute('href', url);
+      name.setAttribute('rel', 'noopener noreferrer');
+      name.setAttribute('target', '_blank');
+      name.style.color = '#0b57d0';
+      name.style.textDecoration = 'underline';
+      name.addEventListener('click', function (ev) {
+        if (ev && typeof ev.preventDefault === 'function') ev.preventDefault();
+        try {
+          var p = liff.openWindow({ url: url, external: true });
+          if (p && typeof p.then === 'function') p.then(null, function () {});
+        } catch (err) {
+          // 開けなくても画面はそのまま
+        }
+      });
+    }
+    name.style.fontSize = '20px';
+    name.style.fontWeight = 'bold';
+    name.style.lineHeight = '1.35';
+    name.style.overflowWrap = 'anywhere';
+    return name;
+  }
+
+  /** 残りのかたまり（残：・数（大きい太字）・単位、記録がなければ 残：記録なし）。 */
+  function amountEl(stock, unit) {
+    var box = el('div');
+    var head = el('span', '', T.nowPrefix);
+    head.style.fontSize = '14px';
+    box.appendChild(head);
+    if (typeof stock === 'number') {
+      var n = el('span', '', String(stock));
+      n.style.fontSize = '24px';
+      n.style.fontWeight = 'bold';
+      n.style.fontVariantNumeric = 'tabular-nums';
+      var u = el('span', '', unit);
+      u.style.fontSize = '14px';
+      box.appendChild(n);
+      box.appendChild(u);
+    } else {
+      var none = el('span', '', T.none);
+      none.style.fontSize = '16px';
+      none.style.fontWeight = 'normal';
+      box.appendChild(none);
+    }
+    return box;
+  }
+
+  /** 在庫の行（左に品目名と印、右に残り）。warn なら赤い太字（既存の status error）。印の決まりは stockItemParts と同じ。 */
   function itemRow(entry, unit, warn) {
     var parts = stockItemParts(entry, unit);
     var row = el('div', warn ? 'status error' : 'name');
@@ -569,17 +729,131 @@ function stockAppStart(root, config, idToken, mode) {
     row.style.justifyContent = 'space-between';
     row.style.alignItems = 'baseline';
     row.style.gap = '8px';
-    var left = el('div', '', parts.name);
+    var left = el('div');
     left.style.flex = '1 1 auto';
     left.style.minWidth = '0';
     left.style.overflowWrap = 'anywhere';
-    var right = el('div', '', parts.amount);
+    left.style.lineHeight = '1.35';
+    left.appendChild(itemNameEl(entry));
+    var mark = parts.name.slice(String(entry.item).length);
+    if (mark !== '') {
+      var m = el('span', '', mark);
+      m.style.fontSize = '16px';
+      m.style.fontWeight = 'bold';
+      left.appendChild(m);
+    }
+    var right = amountEl(entry.stock, unit);
     right.style.flex = '0 0 auto';
     right.style.textAlign = 'right';
     right.style.whiteSpace = 'nowrap';
     row.appendChild(left);
     row.appendChild(right);
     return row;
+  }
+
+  /** 開け閉めの見出しの文字と aria-expanded。 */
+  function setFold(b, name, open) {
+    b.textContent = (open ? T.toggleOpened : T.toggleClosed) + name;
+    b.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  /** 開け閉めの見出しのボタン（幅いっぱい・左寄せ）。locked（探している間・要発注だけの間）は開いて見せ、押せない。big は種類・区分の枠の h2 の中。 */
+  function foldButton(name, open, locked, big, onClick) {
+    var b = button('', 'again', onClick);
+    b.style.display = 'block';
+    b.style.width = '100%';
+    b.style.minHeight = '44px';
+    b.style.textAlign = 'left';
+    b.style.opacity = '1';
+    b.style.fontWeight = 'bold';
+    b.style.padding = '6px 10px';
+    if (big) {
+      b.style.fontSize = '20px';
+    } else {
+      b.style.margin = '8px 0 4px';
+      b.style.fontSize = '18px';
+    }
+    setFold(b, name, open || locked);
+    b.disabled = locked;
+    return b;
+  }
+
+  /** 閉じた見出しが上の帯の下に隠れたままなら、見出しが帯のすぐ下に来るまで戻す。 */
+  function keepBelowBand(target, bandEl) {
+    try {
+      if (!target || !bandEl || typeof target.getBoundingClientRect !== 'function' || typeof bandEl.getBoundingClientRect !== 'function') return;
+      var bottom = bandEl.getBoundingClientRect().bottom;
+      var top = target.getBoundingClientRect().top;
+      var se = document.scrollingElement;
+      if (top < bottom && se) se.scrollTop = Math.max(0, se.scrollTop - (bottom - top));
+    } catch (err) {
+      // 戻せなくても続ける
+    }
+  }
+
+  /** 帯がまだ上に貼り付いていなければ、貼り付く位置（すぐ前の要素の下）までページをスクロールする（ページが短ければ一番下まで）。 */
+  function stickBand(bandEl) {
+    try {
+      var se = document.scrollingElement;
+      var prev = bandEl.previousElementSibling;
+      if (!se || !prev || typeof getComputedStyle !== 'function') return;
+      var top = prev.offsetTop + prev.offsetHeight + (parseFloat(getComputedStyle(prev).marginBottom) || 0);
+      if (se.scrollTop < top) se.scrollTop = top;
+    } catch (err) {
+      // スクロールできなくても続ける
+    }
+  }
+
+  /** 上の固定の帯（mark は list か batch）。地の色は下の帯と同じクラス（actions）から受け、上に固定するように書き替える。 */
+  function stickyBand(mark) {
+    var b = el('div', 'actions');
+    b.setAttribute('data-stock-band', mark);
+    b.style.position = 'sticky';
+    b.style.top = '0';
+    b.style.bottom = 'auto';
+    b.style.zIndex = '2';
+    b.style.borderTop = 'none';
+    b.style.borderBottom = '1px solid #c9cfc4';
+    b.style.margin = '0 -12px';
+    b.style.padding = '8px 12px';
+    b.style.display = 'flex';
+    b.style.flexDirection = 'column';
+    b.style.gap = '6px';
+    return b;
+  }
+
+  /** 帯の探す欄（入れるたびに onChange(文字)。欄そのものは作り直さない）。 */
+  function bandSearch(value, onChange) {
+    var input = el('input', 'stock-search');
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.maxLength = 30;
+    input.setAttribute('aria-label', T.searchLabel);
+    input.setAttribute('placeholder', T.searchHeading);
+    input.style.width = '100%';
+    input.style.height = '44px';
+    input.style.fontSize = '18px';
+    input.style.flexShrink = '0';
+    input.value = value;
+    input.addEventListener('input', function () {
+      onChange(String(input.value));
+    });
+    return input;
+  }
+
+  /** 帯の中のボタンの大きさ（1段に並べる）。 */
+  function bandButton(b) {
+    b.style.flex = '1 1 auto';
+    b.style.minWidth = '0';
+    b.style.minHeight = '44px';
+    b.style.padding = '4px 6px';
+    b.style.fontSize = '16px';
+    return b;
+  }
+
+  /** 動きのボタンの文字（棚卸だけボタン用の文字）。 */
+  function moveButtonText(m) {
+    return m === 'count' ? T.moveCountButton : stockMoveLabel(m);
   }
 
   function closeButton() {
@@ -800,8 +1074,8 @@ function stockAppStart(root, config, idToken, mode) {
       moveCard.appendChild(el('h2', 'heading', T.moveHeading));
       moveCard.appendChild(el('p', 'note', T.nowPrefix + (entry.stock === null ? T.none : entry.stock + unit)));
       var moveChoices = el('div', 'choices');
-      STOCK_MOVES.forEach(function (m) {
-        moveChoices.appendChild(choiceButton(stockMoveLabel(m), state.move === m, function () {
+      STOCK_MOVE_BUTTONS.forEach(function (m) {
+        moveChoices.appendChild(choiceButton(moveButtonText(m), state.move === m, function () {
           if (state.move === m) return;
           state.move = m;
           renderSelect();
@@ -934,6 +1208,9 @@ function stockAppStart(root, config, idToken, mode) {
     batch.move = '';
     batch.texts = Object.create(null);
     batch.entries = [];
+    batchFold = Object.create(null);
+    pendingOpen = false;
+    search.batch = '';
   }
 
   /** いまの種類の品目を表の順に並べた行（[{ item, text }]）。 */
@@ -1054,12 +1331,17 @@ function stockAppStart(root, config, idToken, mode) {
       renderSelect();
     }));
 
+    var navRow = el('div', 'action-row');
+    navRow.appendChild(button(T.openList, 'again', openList));
+    navRow.appendChild(button(T.cancelOpen, 'again', openCancelList));
+    bv = null;
+
     if (currentKind() !== null) {
       var moveCard = el('div', 'card');
       moveCard.appendChild(el('h2', 'heading', T.moveHeading));
       var moveChoices = el('div', 'choices');
-      STOCK_MOVES.forEach(function (m) {
-        moveChoices.appendChild(choiceButton(stockMoveLabel(m), batch.move === m, function () {
+      STOCK_MOVE_BUTTONS.forEach(function (m) {
+        moveChoices.appendChild(choiceButton(moveButtonText(m), batch.move === m, function () {
           if (batch.move === m) return;
           batch.move = m;
           renderBatch();
@@ -1069,60 +1351,227 @@ function stockAppStart(root, config, idToken, mode) {
       root.appendChild(moveCard);
 
       if (batch.move !== '') {
-        var unit = currentUnit();
-        root.appendChild(searchCard('batch', function (hit) {
-          focusBatchItem(hit.item);
-        }));
+        bv = { band: null, input: null, allOpen: null, allClose: null, pending: null, box: null, body: [], anchor: navRow, bar: bar, row: row, toConfirm: toConfirm };
+        root.appendChild(batchBand());
+        if (STOCK_JAN_ENABLED) {
+          var scanRow = el('div', 'action-row');
+          var opened = false;
+          scanRow.appendChild(button(T.scanOpen, 'again', function () {
+            if (opened) return;
+            opened = true;
+            prepareAudio();
+            loadJanTable();
+            scan.origin = 'batch';
+            renderScan();
+          }));
+          root.appendChild(scanRow);
+        }
         root.appendChild(el('p', 'note', batchNote(batch.move)));
-        currentGroups().forEach(function (g) {
-          if (g.items.length === 0) return;
-          var card = el('div', 'card');
-          card.appendChild(el('h2', 'heading', g.label + T.unitOpen + unit + T.unitClose));
-          g.items.forEach(function (e) {
-            var line = el('div');
-            var r = el('div', 'action-row');
-            r.style.alignItems = 'center';
-            var name = el('p', 'name', e.item + '\n' + T.nowPrefix + (e.stock === null ? T.none : e.stock + unit));
-            name.style.flex = '1 1 0';
-            var input = el('input', 'stock-batch-count');
-            input.type = 'text';
-            input.inputMode = 'numeric';
-            input.setAttribute('inputmode', 'numeric');
-            input.pattern = '[0-9]*';
-            input.autocomplete = 'off';
-            input.maxLength = 3;
-            input.setAttribute('aria-label', e.item + T.batchLabelTail);
-            input.style.width = '96px';
-            input.style.height = '48px';
-            input.style.fontSize = '18px';
-            input.style.flex = '0 0 96px';
-            input.style.scrollMarginBottom = '200px';
-            input.value = Object.prototype.hasOwnProperty.call(batch.texts, e.item) ? batch.texts[e.item] : '';
-            batchInputs[e.item] = input;
-            var errorArea = el('div');
-            input.addEventListener('input', function () {
-              batch.texts[e.item] = String(input.value);
-              updateBatchRowError(errorArea, e.item);
-              updateBatchBar(bar, row, toConfirm);
-            });
-            r.appendChild(name);
-            r.appendChild(input);
-            line.appendChild(r);
-            line.appendChild(errorArea);
-            updateBatchRowError(errorArea, e.item);
-            card.appendChild(line);
-          });
-          root.appendChild(card);
-        });
+        renderBatchBody();
       }
     }
 
-    var navRow = el('div', 'action-row');
-    navRow.appendChild(button(T.openList, 'again', openList));
-    navRow.appendChild(button(T.cancelOpen, 'again', openCancelList));
     root.appendChild(navRow);
     updateBatchBar(bar, row, toConfirm);
     root.appendChild(bar);
+  }
+
+  /** まとめての画面の上の帯（探す欄・全部開く／全部閉じる・入力中のまとめ）。 */
+  function batchBand() {
+    var b = stickyBand('batch');
+    bv.band = b;
+    bv.input = bandSearch(search.batch, function (v) {
+      search.batch = v;
+      renderBatchBody();
+    });
+    b.appendChild(bv.input);
+    var r = el('div', 'action-row');
+    bv.allOpen = bandButton(button(T.openAll, 'again', function () {
+      currentGroups().forEach(function (g) { batchFold[g.label] = true; });
+      renderBatchBody();
+    }));
+    bv.allClose = bandButton(button(T.closeAll, 'again', function () {
+      batchFold = Object.create(null);
+      renderBatchBody();
+      keepBelowBand(bv.body[0], bv.band);
+    }));
+    r.appendChild(bv.allOpen);
+    r.appendChild(bv.allClose);
+    r.style.flexShrink = '0';
+    b.appendChild(r);
+    var p = button('', 'again', function () {
+      if (pendingLines().length === 0) return;
+      pendingOpen = !pendingOpen;
+      renderPending();
+      if (pendingOpen) stickBand(bv.band);
+    });
+    p.style.display = 'block';
+    p.style.width = '100%';
+    p.style.minHeight = '44px';
+    p.style.padding = '4px 10px';
+    p.style.fontSize = '16px';
+    p.style.textAlign = 'left';
+    p.style.whiteSpace = 'nowrap';
+    p.style.overflow = 'hidden';
+    p.style.textOverflow = 'ellipsis';
+    p.style.flexShrink = '0';
+    bv.pending = p;
+    b.appendChild(p);
+    var box = el('div');
+    box.style.maxHeight = 'calc(50vh - 180px)';
+    box.style.overflowY = 'auto';
+    box.style.minHeight = '0';
+    bv.box = box;
+    renderPending();
+    return b;
+  }
+
+  /** 入力中の品目の行（表の順。{ text, bad }）。 */
+  function pendingLines() {
+    var unit = currentUnit();
+    var out = [];
+    batchRows().forEach(function (r) {
+      var t = stockPendingLine(r, unit, batch.move);
+      if (t !== '') out.push({ text: t, bad: stockParseCount(r.text, batch.move) === null });
+    });
+    return out;
+  }
+
+  function pendingEl(x) {
+    return el('p', x.bad ? 'status error' : 'note', x.text);
+  }
+
+  /** 入力中のまとめだけを書き直す（帯のほかの要素・表の欄はそのまま）。 */
+  function renderPending() {
+    if (bv === null) return;
+    var p = bv.pending;
+    var box = bv.box;
+    var lines = pendingLines();
+    while (box.firstChild) box.removeChild(box.firstChild);
+    if (box.parentNode === bv.band) bv.band.removeChild(box);
+    if (lines.length === 0) {
+      pendingOpen = false;
+      p.textContent = T.pendingNone;
+      p.setAttribute('aria-expanded', 'false');
+      p.disabled = true;
+      return;
+    }
+    p.disabled = false;
+    p.setAttribute('aria-expanded', pendingOpen ? 'true' : 'false');
+    if (!pendingOpen) {
+      p.textContent = T.pendingHead + lines.length + T.orderCountTail + T.pendingSep + lines[0].text;
+      return;
+    }
+    p.textContent = T.pendingHead + lines.length + T.orderCountTail;
+    lines.forEach(function (x) { box.appendChild(pendingEl(x)); });
+    bv.band.appendChild(box);
+  }
+
+  /** まとめての帯の下の本文（区分の枠）だけを作り直す。探している間は当たった品目の行だけを開いて見せる。 */
+  function renderBatchBody() {
+    if (bv === null) return;
+    bv.body.forEach(function (x) { if (x.parentNode === root) root.removeChild(x); });
+    bv.body = [];
+    batchInputs = Object.create(null);
+    var locked = stockSearchKey(search.batch) !== '';
+    var k = currentKind();
+    var kinds = stockFilterKinds(k !== null ? [k] : [], search.batch, false);
+    var groups = kinds.length === 1 ? kinds[0].groups : [];
+    var add = function (x) {
+      if (bv.anchor.parentNode === root) root.insertBefore(x, bv.anchor);
+      else root.appendChild(x);
+      bv.body.push(x);
+    };
+    if (locked && groups.length === 0) add(el('p', 'note', T.searchNone));
+    groups.forEach(function (g) {
+      if (g.items.length === 0) return;
+      add(batchGroupCard(g, locked));
+    });
+    bv.allOpen.disabled = locked;
+    bv.allClose.disabled = locked;
+  }
+
+  /** まとめての区分の枠（見出しは開け閉め。閉じているときは入力中の品目を3つまで）。 */
+  function batchGroupCard(g, locked) {
+    var unit = currentUnit();
+    var card = el('div', 'card');
+    var h = el('h2', 'heading');
+    var name = g.label + T.unitOpen + unit + T.unitClose;
+    var fill = function (open) {
+      while (h.nextSibling) card.removeChild(h.nextSibling);
+      g.items.forEach(function (e) { delete batchInputs[e.item]; });
+      if (open) {
+        g.items.forEach(function (e) { card.appendChild(batchItemLine(e, unit)); });
+        return;
+      }
+      var lines = [];
+      g.items.forEach(function (e) {
+        var text = Object.prototype.hasOwnProperty.call(batch.texts, e.item) ? batch.texts[e.item] : '';
+        var t = stockPendingLine({ item: e.item, text: text }, unit, batch.move);
+        if (t !== '') lines.push({ text: t, bad: stockParseCount(text, batch.move) === null });
+      });
+      lines.slice(0, STOCK_FOLD_SUMMARY_MAX).forEach(function (x) { card.appendChild(pendingEl(x)); });
+      if (lines.length > STOCK_FOLD_SUMMARY_MAX) {
+        card.appendChild(el('p', 'note', T.searchMoreHead + (lines.length - STOCK_FOLD_SUMMARY_MAX) + T.orderCountTail));
+      }
+    };
+    var b = foldButton(name, batchFold[g.label] === true, locked, true, function () {
+      var open = batchFold[g.label] !== true;
+      if (open) batchFold[g.label] = true;
+      else delete batchFold[g.label];
+      setFold(b, name, open);
+      fill(open);
+      if (!open) keepBelowBand(b, bv.band);
+    });
+    h.appendChild(b);
+    card.appendChild(h);
+    fill(locked || batchFold[g.label] === true);
+    return card;
+  }
+
+  /** まとめての品目の行（左に品目名とその下の残り、右に数の欄）とエラーの場所。 */
+  function batchItemLine(e, unit) {
+    var line = el('div');
+    var r = el('div', 'action-row');
+    r.style.alignItems = 'center';
+    r.style.gap = '16px';
+    var left = el('div', 'name');
+    left.style.flex = '1 1 0';
+    left.style.minWidth = '0';
+    left.style.lineHeight = '1.35';
+    var nameLine = el('div');
+    nameLine.appendChild(itemNameEl(e));
+    left.appendChild(nameLine);
+    left.appendChild(amountEl(e.stock, unit));
+    var input = el('input', 'stock-batch-count');
+    input.type = 'text';
+    input.inputMode = 'numeric';
+    input.setAttribute('inputmode', 'numeric');
+    input.pattern = '[0-9]*';
+    input.autocomplete = 'off';
+    input.maxLength = 3;
+    input.setAttribute('aria-label', e.item + T.batchLabelTail);
+    input.style.width = '96px';
+    input.style.height = '48px';
+    input.style.fontSize = '18px';
+    input.style.flex = '0 0 96px';
+    input.style.scrollMarginTop = '200px';
+    input.style.scrollMarginBottom = '200px';
+    input.value = Object.prototype.hasOwnProperty.call(batch.texts, e.item) ? batch.texts[e.item] : '';
+    batchInputs[e.item] = input;
+    var errorArea = el('div');
+    input.addEventListener('input', function () {
+      batch.texts[e.item] = String(input.value);
+      updateBatchRowError(errorArea, e.item);
+      if (bv !== null) updateBatchBar(bv.bar, bv.row, bv.toConfirm);
+      renderPending();
+    });
+    r.appendChild(left);
+    r.appendChild(input);
+    line.appendChild(r);
+    line.appendChild(errorArea);
+    updateBatchRowError(errorArea, e.item);
+    return line;
   }
 
   function renderBatchConfirm() {
@@ -1317,8 +1766,25 @@ function stockAppStart(root, config, idToken, mode) {
     renderSelect();
   }
 
-  /** まとめての画面で、その品目の数の欄に移る（画面を作り直さない）。 */
+  /** まとめての画面で、その品目の数の欄に移る。区分が閉じていれば開き（覚える状態も開く）、探す文字で隠れていれば探す欄を空にする。 */
   function focusBatchItem(item) {
+    if (bv !== null) {
+      var label = null;
+      currentGroups().forEach(function (g) {
+        g.items.forEach(function (e) { if (e.item === item && label === null) label = g.label; });
+      });
+      if (label !== null) {
+        var key = stockSearchKey(search.batch);
+        var redo = batchFold[label] !== true;
+        batchFold[label] = true;
+        if (key !== '' && stockSearchKey(item).indexOf(key) < 0) {
+          search.batch = '';
+          bv.input.value = '';
+          redo = true;
+        }
+        if (redo) renderBatchBody();
+      }
+    }
     var input = batchInputs[item];
     if (input === undefined) return;
     input.focus();
@@ -2263,32 +2729,156 @@ function stockAppStart(root, config, idToken, mode) {
     });
     if (orders >= 1) root.appendChild(el('p', 'status error', T.orderCountHead + orders + T.orderCountTail));
     else root.appendChild(el('p', 'note', T.orderCountHead + T.orderCountNone));
-    data.kinds.forEach(function (k) {
-      var card = el('div', 'card');
-      card.appendChild(el('h2', 'heading', k.kind));
-      var count = 0;
-      k.groups.forEach(function (g) { count += g.items.length; });
-      if (!k.ready) {
-        card.appendChild(el('p', 'status error', T.kindNotReady));
-      } else if (count === 0) {
-        card.appendChild(el('p', 'note', T.kindEmpty));
-      } else {
-        k.groups.forEach(function (g) {
-          card.appendChild(el('p', 'note', T.groupMark + g.label));
-          g.items.forEach(function (e) {
-            var warn = e.order || (e.stock !== null && e.stock < 0);
-            card.appendChild(itemRow(e, k.unit, warn));
-          });
-        });
-      }
-      root.appendChild(card);
-    });
+    lv = { data: data, text: '', order: false, kinds: Object.create(null), groups: Object.create(null), band: null, filterAll: null, filterOrder: null,
+      allOpen: null, allClose: null, body: [], anchor: null };
+    root.appendChild(listBand());
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(T.openRecord, 'again', function () {
       useListBatch(data);
     }));
     row.appendChild(closeButton());
     root.appendChild(row);
+    lv.anchor = row;
+    renderListBody();
+  }
+
+  /** 在庫を見るの上の帯（探す欄・すべて／要発注だけ・全部開く／全部閉じる）。 */
+  function listBand() {
+    var b = stickyBand('list');
+    lv.band = b;
+    b.appendChild(bandSearch('', function (v) {
+      lv.text = v;
+      renderListBody();
+    }));
+    var r = el('div', 'action-row');
+    lv.filterAll = bandButton(choiceButton(T.filterAll, true, function () { setListOrder(false); }));
+    lv.filterOrder = bandButton(choiceButton(T.filterOrder, false, function () { setListOrder(true); }));
+    lv.allOpen = bandButton(button(T.openAll, 'again', function () {
+      lv.data.kinds.forEach(function (k) {
+        lv.kinds[k.kind] = true;
+        k.groups.forEach(function (g) { lv.groups[listGroupKey(k.kind, g.label)] = true; });
+      });
+      renderListBody();
+    }));
+    lv.allClose = bandButton(button(T.closeAll, 'again', function () {
+      lv.kinds = Object.create(null);
+      lv.groups = Object.create(null);
+      renderListBody();
+      keepBelowBand(lv.body[0], lv.band);
+    }));
+    r.appendChild(lv.filterAll);
+    r.appendChild(lv.filterOrder);
+    r.appendChild(lv.allOpen);
+    r.appendChild(lv.allClose);
+    b.appendChild(r);
+    return b;
+  }
+
+  function setListOrder(on) {
+    if (lv.order === on) return;
+    lv.order = on;
+    lv.filterAll.className = 'choice' + (on ? '' : ' selected');
+    lv.filterAll.setAttribute('aria-pressed', on ? 'false' : 'true');
+    lv.filterOrder.className = 'choice' + (on ? ' selected' : '');
+    lv.filterOrder.setAttribute('aria-pressed', on ? 'true' : 'false');
+    renderListBody();
+  }
+
+  function listGroupKey(kind, label) {
+    return JSON.stringify([kind, label]);
+  }
+
+  /** 在庫を見るの帯の下の本文（種類の枠）だけを作り直す。探している間・要発注だけの間は、残った枠を開いて見せる。 */
+  function renderListBody() {
+    lv.body.forEach(function (x) { if (x.parentNode === root) root.removeChild(x); });
+    lv.body = [];
+    var hasKey = stockSearchKey(lv.text) !== '';
+    var locked = hasKey || lv.order;
+    var kinds = stockFilterKinds(lv.data.kinds, lv.text, lv.order);
+    var add = function (x) {
+      root.insertBefore(x, lv.anchor);
+      lv.body.push(x);
+    };
+    if (locked && kinds.length === 0) add(el('p', 'note', hasKey ? T.searchNone : T.orderOnlyNone));
+    kinds.forEach(function (k) { add(listKindCard(k, locked)); });
+    lv.allOpen.disabled = locked;
+    lv.allClose.disabled = locked;
+  }
+
+  function orderCount(items) {
+    return items.filter(function (e) { return e.order === true; }).length;
+  }
+
+  /** 要発注あり（n品目）の行（n が0なら null）。 */
+  function orderSomeEl(n) {
+    return n >= 1 ? el('p', 'status error', T.orderSomeHead + n + T.orderSomeTail) : null;
+  }
+
+  /** 在庫を見るの種類の枠。 */
+  function listKindCard(k, locked) {
+    var card = el('div', 'card');
+    var count = 0;
+    k.groups.forEach(function (g) { count += g.items.length; });
+    if (!k.ready || count === 0) {
+      card.appendChild(el('h2', 'heading', k.kind));
+      if (!k.ready) card.appendChild(el('p', 'status error', T.kindNotReady));
+      else card.appendChild(el('p', 'note', T.kindEmpty));
+      return card;
+    }
+    var h = el('h2', 'heading');
+    var fill = function (open) {
+      while (h.nextSibling) card.removeChild(h.nextSibling);
+      if (!open) {
+        var all = [];
+        k.groups.forEach(function (g) { all = all.concat(g.items); });
+        var s = orderSomeEl(orderCount(all));
+        if (s !== null) card.appendChild(s);
+        return;
+      }
+      k.groups.forEach(function (g) { card.appendChild(listGroupBox(k, g, locked)); });
+    };
+    var b = foldButton(k.kind, lv.kinds[k.kind] === true, locked, true, function () {
+      var open = lv.kinds[k.kind] !== true;
+      if (open) lv.kinds[k.kind] = true;
+      else delete lv.kinds[k.kind];
+      setFold(b, k.kind, open);
+      fill(open);
+      if (!open) keepBelowBand(b, lv.band);
+    });
+    h.appendChild(b);
+    card.appendChild(h);
+    fill(locked || lv.kinds[k.kind] === true);
+    return card;
+  }
+
+  /** 在庫を見るの区分のかたまり（見出しは開け閉め。閉じているときは要発注あり（n品目））。 */
+  function listGroupBox(k, g, locked) {
+    var box = el('div');
+    var key = listGroupKey(k.kind, g.label);
+    var name = T.groupMark + g.label;
+    var fill = function (open) {
+      while (b.nextSibling) box.removeChild(b.nextSibling);
+      if (!open) {
+        var s = orderSomeEl(orderCount(g.items));
+        if (s !== null) box.appendChild(s);
+        return;
+      }
+      g.items.forEach(function (e) {
+        var warn = e.order || (e.stock !== null && e.stock < 0);
+        box.appendChild(itemRow(e, k.unit, warn));
+      });
+    };
+    var b = foldButton(name, lv.groups[key] === true, locked, false, function () {
+      var open = lv.groups[key] !== true;
+      if (open) lv.groups[key] = true;
+      else delete lv.groups[key];
+      setFold(b, name, open);
+      fill(open);
+      if (!open) keepBelowBand(b, lv.band);
+    });
+    box.appendChild(b);
+    fill(locked || lv.groups[key] === true);
+    return box;
   }
 
   // ---- 取り消し ----
