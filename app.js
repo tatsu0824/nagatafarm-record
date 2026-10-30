@@ -144,6 +144,17 @@ var RECORD_APP_MAP_TEXT = {
   missing: '地図の準備ができていません（管理者に連絡してください）'
 };
 
+/** 選ぶ画面の「自分の名前」の枠の文。 */
+var RECORD_APP_MEMBER_TEXT = {
+  heading: '自分の名前',
+  note: 'ここで自分の名前を選ぶと、ほかの人があなたに除草を依頼したとき、Bot から知らせが届きます（Bot を友だち追加している人だけ）',
+  currentTail: ' で登録しています',
+  change: '名前を変える',
+  cancel: 'やめる',
+  saving: '登録中…',
+  unknown: '登録できたか分かりません。画面を開き直して確かめてください'
+};
+
 // ---- 純粋関数 ----
 
 /** config に LIFF ID と GAS の exec URL が正しい形で入っているとき true。 */
@@ -496,6 +507,7 @@ function recordAppIsForm_(data) {
   if (data.request !== undefined && data.request !== true) return false;
   if (data.requestees !== undefined && (!recordAppIsStringArray_(data.requestees) || data.request !== true)) return false;
   if (data.mapUrl !== undefined && !isMapUrl(data.mapUrl)) return false;
+  if (data.memberName !== undefined && (typeof data.memberName !== 'string' || data.requestees === undefined)) return false;
   return true;
 }
 
@@ -524,9 +536,12 @@ function recordAppStart_() {
   var state = { idToken: '', name: '', groups: [], methods: [], selected: [], range: [], method: '', sending: false, error: '', mine: [], cancelling: false, stateOptions: [], states: [],
     drugMethod: '', drugs: [], parts: [], previous: null, detailsOpen: false, drug: '', ratioText: '', part: '',
     request: false, requesting: false, requestMine: [], requestCancelling: false, requestees: null, requestFrom: '', requestTo: '',
-    mapUrl: null, mapError: '', requestSelected: [] };
+    mapUrl: null, mapError: '', requestSelected: [],
+    memberName: null, memberEditing: false, memberSaving: false, memberStatus: '', memberStatusError: false };
   /** いま出ている送信ボタン（倍率の入力のたびに disabled だけを更新する）。 */
   var sendButton = null;
+  /** いま出ている「自分の名前」の枠（登録の応答のときこの枠の中だけを作り直す）。 */
+  var memberCard = null;
 
   function el(tag, className, text) {
     var e = document.createElement(tag);
@@ -739,9 +754,88 @@ function recordAppStart_() {
     renderRange(card);
   }
 
+  /** 「自分の名前」の枠を出すか（FORM に memberName と requestees があり、候補も登録もない場合を除く）。 */
+  function memberShown() {
+    if (state.memberName === null || state.requestees === null) return false;
+    return !(state.requestees.length === 0 && state.memberName === '');
+  }
+
+  /** 「自分の名前」の枠の中を作り直す（登録していない・登録している・変えている途中）。 */
+  function renderMember(card) {
+    var TM = RECORD_APP_MEMBER_TEXT;
+    while (card.firstChild) card.removeChild(card.firstChild);
+    card.appendChild(el('h2', 'heading', TM.heading));
+    if (state.memberName !== '' && !state.memberEditing) {
+      card.appendChild(el('p', 'member-current', state.memberName + TM.currentTail));
+      if (state.requestees.length >= 1) {
+        var change = button(TM.change, 'again member-change', function () {
+          if (state.memberSaving || state.sending) return;
+          state.memberEditing = true;
+          state.memberStatus = '';
+          renderMember(card);
+        });
+        change.disabled = state.memberSaving || state.sending;
+        card.appendChild(change);
+      }
+    } else {
+      card.appendChild(el('p', 'note', TM.note));
+      var names = el('div', 'choices member-choices');
+      state.requestees.forEach(function (name) {
+        var b = choiceButton(name, state.memberName === name, function () {
+          saveMember(card, name);
+        });
+        b.disabled = state.memberSaving || state.sending;
+        names.appendChild(b);
+      });
+      card.appendChild(names);
+      if (state.memberName !== '') {
+        var cancel = button(TM.cancel, 'reset member-cancel', function () {
+          if (state.memberSaving || state.sending) return;
+          state.memberEditing = false;
+          state.memberStatus = '';
+          renderMember(card);
+        });
+        cancel.disabled = state.memberSaving || state.sending;
+        card.appendChild(cancel);
+      }
+    }
+    if (state.memberSaving) card.appendChild(el('p', 'status', TM.saving));
+    else if (state.memberStatus !== '') card.appendChild(el('p', state.memberStatusError ? 'status error' : 'status', state.memberStatus));
+  }
+
+  /** member を1回だけ送る（記録の選択・エラーの文・送信のボタンは変えない。FORM を送り直さない）。 */
+  function saveMember(card, name) {
+    if (state.memberSaving || state.sending) return;
+    state.memberSaving = true;
+    state.memberStatus = '';
+    renderMember(card);
+    post({ action: 'member', idToken: state.idToken, name: name }).then(function (r) {
+      state.memberSaving = false;
+      if (r.ok && r.data.result === 'ok' && typeof r.data.memberName === 'string' && typeof r.data.message === 'string') {
+        state.memberName = r.data.memberName;
+        state.memberEditing = false;
+        state.memberStatus = r.data.message;
+        state.memberStatusError = false;
+      } else if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+        state.memberStatus = r.data.message;
+        state.memberStatusError = true;
+      } else {
+        state.memberStatus = RECORD_APP_MEMBER_TEXT.unknown;
+        state.memberStatusError = true;
+      }
+      if (memberCard !== null) renderMember(memberCard);
+    }).catch(function () {
+      state.memberSaving = false;
+      state.memberStatus = RECORD_APP_MEMBER_TEXT.unknown;
+      state.memberStatusError = true;
+      if (memberCard !== null) renderMember(memberCard);
+    });
+  }
+
   function renderSelect() {
     clear();
     sendButton = null;
+    memberCard = null;
     var details = hasDetails();
     root.appendChild(el('p', 'name', state.name + T.nameSuffix));
     if (state.mapUrl !== null) {
@@ -763,6 +857,12 @@ function recordAppStart_() {
       requestPageOpen.disabled = state.sending;
       requestRow.appendChild(requestPageOpen);
       root.appendChild(requestRow);
+    }
+
+    if (memberShown()) {
+      memberCard = el('div', 'card card-member');
+      root.appendChild(memberCard);
+      renderMember(memberCard);
     }
 
     var placeCard = el('div', 'card card-place');
@@ -1461,6 +1561,9 @@ function recordAppStart_() {
       state.part = '';
       state.selected = presetSelection(data.groups, preset);
       state.mapUrl = data.mapUrl !== undefined ? data.mapUrl : null;
+      state.memberName = typeof data.memberName === 'string' ? data.memberName : null;
+      state.memberEditing = false;
+      state.memberStatus = '';
       if (goMap === true && state.mapUrl === null) state.mapError = RECORD_APP_MAP_TEXT.missing;
       renderSelect();
       if (goMap === true && state.mapUrl !== null) openMap();
