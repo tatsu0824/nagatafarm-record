@@ -1,9 +1,9 @@
 /*
- * 記録画面（LIFF）の在庫の画面。?go=stock（在庫を記録）・?go=stocklist（在庫を見る）で app.js から呼ばれる。
+ * 記録画面（LIFF）の在庫の画面。?go=stock（入庫出庫）・?go=stocklist（在庫を見る）で app.js から呼ばれる。
  * 種類・単位・品目・区分・残りの数は毎回 GAS（?route=stock）から受け取る（このファイルに品目名・種類名・単位などの現場の情報を書かない）。
  * 表示はすべて createElement と textContent で作る。キーボードを出す要素は、数の入力欄・品目名で探す欄・JAN コードの番号の欄だけ。
- * 在庫を記録の画面には、品目名で探す欄と、カメラで JAN コード（13けたのバーコード）を読む機能を置く。
- * バーコードを読むライブラリ（ZXing）は、初めて読むときに1回だけ、版を固定し SRI を付けて読む（このフォルダーに置かない）。
+ * 入庫出庫の画面には、品目名で探す欄と、カメラで JAN コード（13けたのバーコード）を読む機能（JAN の切り替えの定数が真のときだけ）を置く。
+ * バーコードを読むライブラリ（ZXing）は、JAN の切り替えの定数が真のときだけ、初めて読むときに1回だけ、版を固定し SRI を付けて読む（このフォルダーに置かない）。
  * グループには何も送らない。読み込んだだけでは何もしない（app.js が stockAppStart を呼ぶ）。
  */
 
@@ -12,7 +12,7 @@ var STOCK_TIMEOUT_MS = 30000;
 
 /** 画面の文言（1か所ずつ）。 */
 var STOCK_APP_TEXT = {
-  titleRecord: '在庫を記録',
+  titleRecord: '入庫出庫',
   titleList: '在庫を見る',
   loading: '読み込み中…',
   loadFailed: '読み込めませんでした。電波のよい所で開き直してください',
@@ -28,11 +28,11 @@ var STOCK_APP_TEXT = {
   unitClose: '）',
   nowPrefix: 'いまの残り：',
   none: '記録なし',
-  moveIn: '入れた',
-  moveOut: '使った',
-  moveCount: '数えなおし',
-  noteIn: '入れた数（1〜999）',
-  noteOut: '使った数（1〜999）',
+  moveIn: '入庫',
+  moveOut: '出庫',
+  moveCount: '棚卸',
+  noteIn: '入庫する数（1〜999）',
+  noteOut: '出庫する数（1〜999）',
   noteCount: 'いま数えた数（0〜999）。この数が残りになります',
   errorInOut: '数は 1〜999 の整数で入れてください',
   errorCount: '数は 0〜999 の整数で入れてください',
@@ -46,11 +46,11 @@ var STOCK_APP_TEXT = {
   remainPrefix: '残り ',
   orderHead: '要発注：残りが目安（',
   orderTail: '）以下です',
-  negative: '記録の数が合いません。数えなおしてください',
+  negative: '記録の数が合いません。棚卸してください',
   sendUnknown: '送信できたか分かりません。「記録を取り消す」の一覧で確かめてから、もう一度記録してください',
   again: '続けて記録する',
   openList: '在庫を見る',
-  openRecord: '在庫を記録する',
+  openRecord: '入庫出庫へ',
   asOfTail: ' 時点',
   orderCountHead: '要発注：',
   orderCountTail: '品目',
@@ -59,8 +59,8 @@ var STOCK_APP_TEXT = {
   kindEmpty: '品目がまだありません',
   groupMark: '■',
   markOrder: '（要発注）',
-  markRecount: '（数えなおしてください）',
-  markBoth: '（要発注・数えなおしてください）',
+  markRecount: '（棚卸してください）',
+  markBoth: '（要発注・棚卸してください）',
   cancelOpen: '記録を取り消す',
   cancelHeading: '取り消せる在庫の記録',
   cancelNote: '自分が24時間以内に記録したものだけ取り消せます',
@@ -70,12 +70,12 @@ var STOCK_APP_TEXT = {
   cancelNo: 'やめる',
   cancelUnknown: '取り消せたか分かりません。「続けて取り消す」で一覧を開き直して確かめてください',
   cancelMore: '続けて取り消す',
-  backToRecord: '在庫の記録に戻る',
+  backToRecord: '入庫出庫に戻る',
   close: '閉じる',
-  batchOpen: 'まとめて記録（棚卸・納品）',
+  batchOpen: 'まとめて記録に戻る',
   batchOne: '1つずつ記録',
-  batchNoteIn: '入れた数を書いてください（1〜999）。空欄の品目は記録しません',
-  batchNoteOut: '使った数を書いてください（1〜999）。空欄の品目は記録しません',
+  batchNoteIn: '入庫する数を書いてください（1〜999）。空欄の品目は記録しません',
+  batchNoteOut: '出庫する数を書いてください（1〜999）。空欄の品目は記録しません',
   batchNoteCount: 'いま数えた数を書いてください（0〜999）。この数が残りになります。空欄の品目は記録しません',
   batchCountHead: '記録する品目：',
   batchInvalidHead: '数が正しくない品目があります：',
@@ -165,6 +165,9 @@ var STOCK_SCAN_CHECK_MAX = 20;
 
 /** JAN の対応表の要素の上限（GAS と同じ）。 */
 var STOCK_JAN_TABLE_MAX = 1000;
+
+/** JAN（バーコード）の読み取りを画面に出すか。真にすると T44 の画面に戻る（README の手順） */
+var STOCK_JAN_ENABLED = false;
 
 /** 読めたときの音（方形波の周波数 Hz・長さ ms・音量）と振動。 */
 var STOCK_BEEP_GOOD = { freq: 1000, ms: 80, gain: 0.1, vibrate: 40 };
@@ -505,7 +508,7 @@ function stockJanTableMap(data) {
 }
 
 /**
- * 在庫の画面を root の中に作る（ブラウザだけで使う）。mode は 'stock'（在庫を記録）か 'stocklist'（在庫を見る）。
+ * 在庫の画面を root の中に作る（ブラウザだけで使う）。mode は 'stock'（入庫出庫。まとめて記録の画面から始める）か 'stocklist'（在庫を見る）。
  * app.js の関数・状態は使わない。
  */
 function stockAppStart(root, config, idToken, mode) {
@@ -697,6 +700,11 @@ function stockAppStart(root, config, idToken, mode) {
 
   function openRecord() {
     loadList(T.titleRecord, useList);
+  }
+
+  /** 一覧を読み、まとめての画面を開く（入庫出庫の最初の画面・取り消しの画面から戻るとき）。 */
+  function openBatch() {
+    loadList(T.titleRecord, useListBatch);
   }
 
   // ---- 在庫を記録（選ぶ画面） ----
@@ -1109,6 +1117,10 @@ function stockAppStart(root, config, idToken, mode) {
       }
     }
 
+    var navRow = el('div', 'action-row');
+    navRow.appendChild(button(T.openList, 'again', openList));
+    navRow.appendChild(button(T.cancelOpen, 'again', openCancelList));
+    root.appendChild(navRow);
     updateBatchBar(bar, row, toConfirm);
     root.appendChild(bar);
   }
@@ -1267,21 +1279,23 @@ function stockAppStart(root, config, idToken, mode) {
     card.appendChild(el('p', 'note', T.searchNote));
     card.appendChild(area);
     renderSearchResults(area, mode, onPick);
-    var row = el('div', 'action-row');
-    var opened = false;
-    row.appendChild(button(T.scanOpen, 'again', function () {
-      if (opened) return;
-      opened = true;
-      prepareAudio();
-      loadJanTable();
-      if (mode === 'batch') {
-        scan.origin = 'batch';
-        renderScan();
-      } else {
-        renderRegister();
-      }
-    }));
-    card.appendChild(row);
+    if (STOCK_JAN_ENABLED) {
+      var row = el('div', 'action-row');
+      var opened = false;
+      row.appendChild(button(T.scanOpen, 'again', function () {
+        if (opened) return;
+        opened = true;
+        prepareAudio();
+        loadJanTable();
+        if (mode === 'batch') {
+          scan.origin = 'batch';
+          renderScan();
+        } else {
+          renderRegister();
+        }
+      }));
+      card.appendChild(row);
+    }
     if (search.flash !== '') {
       card.appendChild(el('p', 'status', search.flash));
       search.flash = '';
@@ -2271,7 +2285,7 @@ function stockAppStart(root, config, idToken, mode) {
     });
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(T.openRecord, 'again', function () {
-      useList(data);
+      useListBatch(data);
     }));
     row.appendChild(closeButton());
     root.appendChild(row);
@@ -2281,7 +2295,7 @@ function stockAppStart(root, config, idToken, mode) {
 
   function backRow() {
     var row = el('div', 'action-row');
-    row.appendChild(button(T.backToRecord, 'reset', openRecord));
+    row.appendChild(button(T.backToRecord, 'reset', openBatch));
     return row;
   }
 
@@ -2364,13 +2378,13 @@ function stockAppStart(root, config, idToken, mode) {
     }
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(T.cancelMore, 'again', openCancelList));
-    row.appendChild(button(T.backToRecord, 'reset', openRecord));
+    row.appendChild(button(T.backToRecord, 'reset', openBatch));
     row.appendChild(closeButton());
     root.appendChild(row);
   }
 
   if (mode === 'stocklist') openList();
-  else openRecord();
+  else openBatch();
 }
 
 if (typeof module !== 'undefined') {
