@@ -144,7 +144,24 @@ var STOCK_APP_TEXT = {
   pendingSep: '：',
   pendingFix: '数を直してください',
   moveCountButton: '棚卸（再カウント）',
-  linkMark: ' ↗'
+  linkMark: ' ↗',
+  cancelCheckOff: '☐ ',
+  cancelCheckOn: '☑ ',
+  cancelPickHead: '選んだ記録を取り消す（',
+  cancelPickTail: '件）',
+  cancelManyHead: '次の ',
+  cancelManyTail: '件の記録を取り消しますか？',
+  cancelProgressHead: '取り消し中…（',
+  cancelProgressMid: '件中 ',
+  cancelProgressTail: '件目）',
+  cancelCountTail: '件',
+  cancelDoneHead: '取り消した記録：',
+  cancelFailHead: '取り消せなかった記録：',
+  cancelUnknownOne: '取り消せたか分かりません',
+  cancelNotSent: '送っていません（途中で止めました）',
+  cancelStopped: '途中で止めたため、残りの記録は取り消していません。「続けて取り消す」で一覧を開き直して確かめてください',
+  cancelEach: '記録ごとの結果',
+  cancelRemain: '取り消した品目の残り'
 };
 
 /** まとめての記録で一度に送れる品目の上限。 */
@@ -288,6 +305,23 @@ function stockItemParts(entry, unit) {
   else if (order) mark = T.markOrder;
   else if (recount) mark = T.markRecount;
   return { name: entry.item + mark, amount: amount };
+}
+
+/** 品目名を末尾のかっこ（容量）の前で分ける（{ main, cap }。main + cap === item）。分けないときは cap が ''。例外を投げない。 */
+function stockNameParts(item) {
+  if (typeof item !== 'string') return { main: '', cap: '' };
+  var last = item.charAt(item.length - 1);
+  var open;
+  if (last === ')') open = '(';
+  else if (last === '）') open = '（';
+  else return { main: item, cap: '' };
+  var i = item.lastIndexOf(open);
+  if (i < 0) return { main: item, cap: '' };
+  var inner = item.slice(i + 1, item.length - 1);
+  if (inner.length < 1 || /[()（）]/.test(inner)) return { main: item, cap: '' };
+  var main = item.slice(0, i);
+  if (!/[^\s　]/.test(main)) return { main: item, cap: '' };
+  return { main: main, cap: item.slice(i) };
 }
 
 function stockListBody(idToken) {
@@ -608,7 +642,7 @@ function stockJanTableMap(data) {
  */
 function stockAppStart(root, config, idToken, mode) {
   var T = STOCK_APP_TEXT;
-  var state = { name: '', kinds: [], kind: null, group: null, item: null, move: '', countText: '', count: null, sending: false, mine: [] };
+  var state = { name: '', kinds: [], kind: null, group: null, item: null, move: '', countText: '', count: null, sending: false, mine: [], picked: [] };
   /** まとめての画面の状態（動き・表に入れた文字（品目名ごと）・その種類・確認へ進んだときの entries）。 */
   var batch = { kind: null, move: '', texts: Object.create(null), entries: [] };
   /** いま出ている「確認へ」のボタン（数の入力のたびに disabled だけを更新する）。 */
@@ -667,16 +701,18 @@ function stockAppStart(root, config, idToken, mode) {
 
   /**
    * 品目名の要素（大きい太字）。品目に検めて正しい url があれば、品目名の文字だけをリンクにする。
+   * 品目名の末尾のかっこ（容量）は改行して2行目に小さく出す（stockNameParts。リンクは2行とも）。
    * リンクを押すと既定の動きを止め、LIFF で端末のブラウザに開く（LIFF の画面は残る）。開けなくても画面はそのまま。
    */
   function itemNameEl(entry) {
     var url = stockLinkUrl(entry.url);
+    var np = stockNameParts(entry.item);
     var name;
     if (url === '') {
-      name = el('span', '', entry.item);
+      name = np.cap === '' ? el('span', '', entry.item) : el('span');
     } else {
       name = document.createElement('a');
-      name.textContent = entry.item + T.linkMark;
+      if (np.cap === '') name.textContent = entry.item + T.linkMark;
       name.setAttribute('href', url);
       name.setAttribute('rel', 'noopener noreferrer');
       name.setAttribute('target', '_blank');
@@ -691,6 +727,15 @@ function stockAppStart(root, config, idToken, mode) {
           // 開けなくても画面はそのまま
         }
       });
+    }
+    if (np.cap !== '') {
+      name.appendChild(el('span', '', np.main));
+      name.appendChild(el('br'));
+      var cap = el('span', '', np.cap);
+      cap.style.fontSize = '16px';
+      cap.style.fontWeight = 'normal';
+      name.appendChild(cap);
+      if (url !== '') name.appendChild(el('span', '', T.linkMark));
     }
     name.style.fontSize = '20px';
     name.style.fontWeight = 'bold';
@@ -2915,6 +2960,7 @@ function stockAppStart(root, config, idToken, mode) {
     post(stockMineBody(idToken)).then(function (r) {
       if (r.ok && stockIsMine(r.data)) {
         state.mine = r.data.records;
+        state.picked = [];
         renderCancelList();
         return;
       }
@@ -2930,32 +2976,126 @@ function stockAppStart(root, config, idToken, mode) {
     return rec.time + ' ' + rec.label;
   }
 
+  /**
+   * 取り消せる記録の一覧。記録ごとのボタンは選ぶ切り替え（押しても画面を移らない。state.picked に添字を持つ）。
+   * 下の帯の「選んだ記録を取り消す（n件）」で、選んだ記録を一覧の順に並べて確認へ進む（0件のときは押せない）。
+   */
   function renderCancelList() {
     clear(T.titleRecord);
     root.appendChild(el('h2', 'heading', T.cancelHeading));
     root.appendChild(el('p', 'note', T.cancelNote));
-    if (state.mine.length === 0) root.appendChild(el('p', 'note', T.cancelEmpty));
-    state.mine.forEach(function (rec) {
+    if (state.mine.length === 0) {
+      root.appendChild(el('p', 'note', T.cancelEmpty));
+      root.appendChild(backRow());
+      return;
+    }
+    var go = null;
+    var setGo = function () {
+      go.textContent = T.cancelPickHead + state.picked.length + T.cancelPickTail;
+      go.disabled = state.picked.length === 0;
+    };
+    var setPick = function (b, rec, on) {
+      b.className = 'choice' + (on ? ' selected' : '');
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.textContent = (on ? T.cancelCheckOn : T.cancelCheckOff) + recText(rec);
+    };
+    state.mine.forEach(function (rec, idx) {
       var row = el('div', 'action-row');
-      row.appendChild(button(recText(rec), 'again', function () {
-        renderCancelConfirm(rec);
-      }));
+      var b = choiceButton('', false, function () {
+        var at = state.picked.indexOf(idx);
+        if (at >= 0) state.picked.splice(at, 1);
+        else state.picked.push(idx);
+        setPick(b, rec, at < 0);
+        setGo();
+      });
+      b.style.textAlign = 'left';
+      b.style.minHeight = '44px';
+      setPick(b, rec, state.picked.indexOf(idx) >= 0);
+      row.appendChild(b);
       root.appendChild(row);
     });
-    root.appendChild(backRow());
+    var bar = el('div', 'actions');
+    var goRow = el('div', 'action-row');
+    go = button('', 'send', function () {
+      if (state.picked.length === 0) return;
+      var recs = state.mine.filter(function (rec, idx) { return state.picked.indexOf(idx) >= 0; });
+      renderCancelConfirm(recs);
+    });
+    setGo();
+    goRow.appendChild(go);
+    bar.appendChild(goRow);
+    bar.appendChild(backRow());
+    root.appendChild(bar);
   }
 
-  function renderCancelConfirm(rec) {
+  /**
+   * 取り消しの確認（recs は選んだ記録。一覧の順）。1件のときは今までと同じ画面・送り方・結果。
+   * 2件以上のときは1件ずつ順に送り（前の応答を受けてから次）、stale は続け、ほかの失敗と分からないときは止める。
+   */
+  function renderCancelConfirm(recs) {
     clear(T.titleRecord);
-    root.appendChild(el('p', 'note', T.kindPrefix + rec.kind));
-    root.appendChild(el('p', 'result', recText(rec)));
-    root.appendChild(el('p', 'message', T.cancelConfirm));
+    var many = recs.length > 1;
+    var rec = recs[0];
+    if (many) {
+      var kinds = [];
+      recs.forEach(function (x) {
+        if (kinds.indexOf(x.kind) < 0) kinds.push(x.kind);
+      });
+      root.appendChild(el('p', 'note', T.kindPrefix + kinds.join(T.listSep)));
+      root.appendChild(el('p', 'message', T.cancelManyHead + recs.length + T.cancelManyTail));
+      root.appendChild(el('p', 'result', recs.map(function (x) { return T.batchBullet + recText(x); }).join('\n')));
+    } else {
+      root.appendChild(el('p', 'note', T.kindPrefix + rec.kind));
+      root.appendChild(el('p', 'result', recText(rec)));
+      root.appendChild(el('p', 'message', T.cancelConfirm));
+    }
+    /** 1件の応答の分け方（ok・stale・fail（そのほかの result）・unknown）。 */
+    function outcome(x, r) {
+      if (r.ok && stockIsCancelOk(r.data)) return { rec: x, kind: 'ok', data: r.data };
+      if (r.ok && r.data.result !== 'ok' && typeof r.data.message === 'string') {
+        return { rec: x, kind: r.data.result === 'stale' ? 'stale' : 'fail', message: r.data.message };
+      }
+      return { rec: x, kind: 'unknown' };
+    }
+    /** i 件目を送り、応答を受けてから次を送る（同時に送らない）。止めたら残りは送っていないとする。 */
+    function sendMany(progress, results, i) {
+      if (i >= recs.length) {
+        state.sending = false;
+        renderCancelManyResult(results);
+        return;
+      }
+      progress.textContent = T.cancelProgressHead + recs.length + T.cancelProgressMid + (i + 1) + T.cancelProgressTail;
+      var settled = false;
+      var settle = function (res) {
+        if (settled) return;
+        settled = true;
+        results.push(res);
+        if (res.kind === 'ok' || res.kind === 'stale') {
+          sendMany(progress, results, i + 1);
+          return;
+        }
+        recs.slice(i + 1).forEach(function (x) { results.push({ rec: x, kind: 'notsent' }); });
+        state.sending = false;
+        renderCancelManyResult(results);
+      };
+      post(stockCancelBody(idToken, recs[i])).then(function (r) {
+        settle(outcome(recs[i], r));
+      }).catch(function () {
+        settle({ rec: recs[i], kind: 'unknown' });
+      });
+    }
     var row = el('div', 'action-row');
     var yes = button(T.cancelYes, 'send', function () {
       if (state.sending) return;
       state.sending = true;
       yes.disabled = true;
       no.disabled = true;
+      if (many) {
+        var progress = el('p', 'status', '');
+        root.appendChild(progress);
+        sendMany(progress, [], 0);
+        return;
+      }
       root.appendChild(el('p', 'status', T.sending));
       post(stockCancelBody(idToken, rec)).then(function (r) {
         state.sending = false;
@@ -2986,6 +3126,63 @@ function stockAppStart(root, config, idToken, mode) {
       root.appendChild(el('p', 'result', r.data.message));
     } else {
       root.appendChild(el('p', 'status error', T.cancelUnknown));
+    }
+    var row = el('div', 'action-row result-actions');
+    row.appendChild(button(T.cancelMore, 'again', openCancelList));
+    row.appendChild(button(T.backToRecord, 'reset', openBatch));
+    row.appendChild(closeButton());
+    root.appendChild(row);
+  }
+
+  /**
+   * 2件以上の取り消しの結果（取り消した数・取り消せなかった数・止めた案内・記録ごとの結果・取り消した品目の残り）。
+   * results は一覧の順の { rec, kind（ok・stale・fail・unknown・notsent）, data, message }。
+   */
+  function renderCancelManyResult(results) {
+    clear(T.titleRecord);
+    var done = 0;
+    var failed = 0;
+    var unknown = 0;
+    var notSent = 0;
+    results.forEach(function (x) {
+      if (x.kind === 'ok') done++;
+      else if (x.kind === 'stale' || x.kind === 'fail') failed++;
+      else if (x.kind === 'unknown') unknown++;
+      else notSent++;
+    });
+    root.appendChild(el('p', 'result', T.cancelDoneHead + done + T.cancelCountTail));
+    if (failed > 0) root.appendChild(el('p', 'status error', T.cancelFailHead + failed + T.cancelCountTail));
+    if (unknown > 0) root.appendChild(el('p', 'status error', T.cancelUnknown));
+    else if (notSent > 0) root.appendChild(el('p', 'status error', T.cancelStopped));
+    var each = el('div', 'card');
+    each.appendChild(el('h2', 'heading', T.cancelEach));
+    results.forEach(function (x) {
+      if (x.kind === 'ok') each.appendChild(el('p', 'result', x.data.message));
+      else if (x.kind === 'stale' || x.kind === 'fail') each.appendChild(el('p', 'status error', recText(x.rec) + T.pendingSep + x.message));
+      else if (x.kind === 'unknown') each.appendChild(el('p', 'status error', recText(x.rec) + T.pendingSep + T.cancelUnknownOne));
+      else each.appendChild(el('p', 'note', recText(x.rec) + T.pendingSep + T.cancelNotSent));
+    });
+    root.appendChild(each);
+    var keys = [];
+    var last = Object.create(null);
+    results.forEach(function (x) {
+      if (x.kind !== 'ok') return;
+      var key = JSON.stringify([x.data.kind, x.data.item]);
+      if (!(key in last)) keys.push(key);
+      last[key] = x.data;
+    });
+    if (keys.length > 0) {
+      var card = el('div', 'card');
+      card.appendChild(el('h2', 'heading', T.cancelRemain));
+      var negative = false;
+      keys.forEach(function (key) {
+        var d = last[key];
+        var warn = typeof d.stock === 'number' && d.stock < 0;
+        if (warn) negative = true;
+        card.appendChild(itemRow({ item: d.item, stock: d.stock, order: false }, d.unit, warn));
+      });
+      root.appendChild(card);
+      if (negative) root.appendChild(el('p', 'status error', T.negative));
     }
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(T.cancelMore, 'again', openCancelList));
