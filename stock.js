@@ -2851,11 +2851,13 @@ function stockAppStart(root, config, idToken, mode) {
     return card;
   }
 
-  /** 在庫を見るの区分のかたまり（見出しは開け閉め。閉じているときは要発注あり（n品目））。 */
+  /** 在庫を見るの区分のかたまり（見出しは開け閉め。閉じているときは要発注あり（n品目））。種類より一段下げ（16px）、左に縦の線。見出しに ■ は付けない。 */
   function listGroupBox(k, g, locked) {
     var box = el('div');
+    box.style.paddingLeft = '12px';
+    box.style.borderLeft = '4px solid #7a847a';
     var key = listGroupKey(k.kind, g.label);
-    var name = T.groupMark + g.label;
+    var name = g.label;
     var fill = function (open) {
       while (b.nextSibling) box.removeChild(b.nextSibling);
       if (!open) {
