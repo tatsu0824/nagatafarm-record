@@ -623,11 +623,13 @@ function stockAppStart(root, config, idToken, mode) {
   var jt = { state: '', map: null, queue: [], inflight: Object.create(null) };
   /** 続けて読む画面（一覧の種類・行・確かめてください・JAN ごとの最後に読めた時刻・動き・送る entries・いまの画面の部品）。 */
   var reg = { kind: null, rows: [], checks: [], last: Object.create(null), gen: 0, move: '', entries: [], view: null, beeped: null };
-  /** 在庫を見るの画面（データ・探す文字・要発注だけ・開いた種類と区分・帯の部品・本文の要素）。renderList のたびに作り直す。 */
+  /** 在庫を見るの画面（データ・探す文字・要発注だけ・開いた種類と区分・帯の部品・本文の要素・絞り方と絞った中で閉じた種類と区分）。renderList のたびに作り直す。 */
   var lv = null;
   /** まとめての画面の開いた区分（区分名ごと）と、入力中のまとめを広げているか。resetBatch で閉じる。 */
   var batchFold = Object.create(null);
   var pendingOpen = false;
+  /** まとめての画面で探している間の開け閉め（絞り方＝探す文字のキーと、絞った中で閉じた区分）。キーが変わると全部開く。resetBatch で捨てる。 */
+  var batchFilterFold = { key: '', closed: Object.create(null) };
   /** まとめての画面の帯の部品と本文の要素（表が出ている間だけ。renderBatch のたびに作り直す）。 */
   var bv = null;
 
@@ -757,8 +759,8 @@ function stockAppStart(root, config, idToken, mode) {
     b.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
-  /** 開け閉めの見出しのボタン（幅いっぱい・左寄せ）。locked（探している間・要発注だけの間）は開いて見せ、押せない。big は種類・区分の枠の h2 の中。 */
-  function foldButton(name, open, locked, big, onClick) {
+  /** 開け閉めの見出しのボタン（幅いっぱい・左寄せ）。探している間・要発注だけの間も押せる。big は種類・区分の枠の h2 の中。 */
+  function foldButton(name, open, big, onClick) {
     var b = button('', 'again', onClick);
     b.style.display = 'block';
     b.style.width = '100%';
@@ -773,8 +775,7 @@ function stockAppStart(root, config, idToken, mode) {
       b.style.margin = '8px 0 4px';
       b.style.fontSize = '18px';
     }
-    setFold(b, name, open || locked);
-    b.disabled = locked;
+    setFold(b, name, open);
     return b;
   }
 
@@ -1209,6 +1210,7 @@ function stockAppStart(root, config, idToken, mode) {
     batch.texts = Object.create(null);
     batch.entries = [];
     batchFold = Object.create(null);
+    batchFilterFold = { key: '', closed: Object.create(null) };
     pendingOpen = false;
     search.batch = '';
   }
@@ -1376,7 +1378,7 @@ function stockAppStart(root, config, idToken, mode) {
     root.appendChild(bar);
   }
 
-  /** まとめての画面の上の帯（探す欄・全部開く／全部閉じる・入力中のまとめ）。 */
+  /** まとめての画面の上の帯（探す欄・入力中のまとめ）。 */
   function batchBand() {
     var b = stickyBand('batch');
     bv.band = b;
@@ -1385,20 +1387,6 @@ function stockAppStart(root, config, idToken, mode) {
       renderBatchBody();
     });
     b.appendChild(bv.input);
-    var r = el('div', 'action-row');
-    bv.allOpen = bandButton(button(T.openAll, 'again', function () {
-      currentGroups().forEach(function (g) { batchFold[g.label] = true; });
-      renderBatchBody();
-    }));
-    bv.allClose = bandButton(button(T.closeAll, 'again', function () {
-      batchFold = Object.create(null);
-      renderBatchBody();
-      keepBelowBand(bv.body[0], bv.band);
-    }));
-    r.appendChild(bv.allOpen);
-    r.appendChild(bv.allClose);
-    r.style.flexShrink = '0';
-    b.appendChild(r);
     var p = button('', 'again', function () {
       if (pendingLines().length === 0) return;
       pendingOpen = !pendingOpen;
@@ -1467,13 +1455,18 @@ function stockAppStart(root, config, idToken, mode) {
     bv.band.appendChild(box);
   }
 
-  /** まとめての帯の下の本文（区分の枠）だけを作り直す。探している間は当たった品目の行だけを開いて見せる。 */
+  /**
+   * まとめての帯の下の本文（区分の枠）だけを作り直す。探している間は当たった品目の行だけを出し、区分は絞った中の開け閉めで出す
+   * （探す文字のキーが前と違えば全部開いた形に戻す）。
+   */
   function renderBatchBody() {
     if (bv === null) return;
     bv.body.forEach(function (x) { if (x.parentNode === root) root.removeChild(x); });
     bv.body = [];
     batchInputs = Object.create(null);
-    var locked = stockSearchKey(search.batch) !== '';
+    var fkey = stockSearchKey(search.batch);
+    if (fkey !== batchFilterFold.key) batchFilterFold = { key: fkey, closed: Object.create(null) };
+    var locked = fkey !== '';
     var k = currentKind();
     var kinds = stockFilterKinds(k !== null ? [k] : [], search.batch, false);
     var groups = kinds.length === 1 ? kinds[0].groups : [];
@@ -1487,11 +1480,12 @@ function stockAppStart(root, config, idToken, mode) {
       if (g.items.length === 0) return;
       add(batchGroupCard(g, locked));
     });
-    bv.allOpen.disabled = locked;
-    bv.allClose.disabled = locked;
   }
 
-  /** まとめての区分の枠（見出しは開け閉め。閉じているときは入力中の品目を3つまで）。 */
+  /**
+   * まとめての区分の枠（見出しは開け閉め。閉じているときは入力中の品目を3つまで）。
+   * locked（探している間）は絞った中の開け閉め（batchFilterFold）を使い、batchFold は変えない。g は絞った写し。
+   */
   function batchGroupCard(g, locked) {
     var unit = currentUnit();
     var card = el('div', 'card');
@@ -1515,17 +1509,25 @@ function stockAppStart(root, config, idToken, mode) {
         card.appendChild(el('p', 'note', T.searchMoreHead + (lines.length - STOCK_FOLD_SUMMARY_MAX) + T.orderCountTail));
       }
     };
-    var b = foldButton(name, batchFold[g.label] === true, locked, true, function () {
-      var open = batchFold[g.label] !== true;
-      if (open) batchFold[g.label] = true;
-      else delete batchFold[g.label];
+    var first = locked ? batchFilterFold.closed[g.label] !== true : batchFold[g.label] === true;
+    var b = foldButton(name, first, true, function () {
+      var open;
+      if (locked) {
+        open = batchFilterFold.closed[g.label] === true;
+        if (open) delete batchFilterFold.closed[g.label];
+        else batchFilterFold.closed[g.label] = true;
+      } else {
+        open = batchFold[g.label] !== true;
+        if (open) batchFold[g.label] = true;
+        else delete batchFold[g.label];
+      }
       setFold(b, name, open);
       fill(open);
       if (!open) keepBelowBand(b, bv.band);
     });
     h.appendChild(b);
     card.appendChild(h);
-    fill(locked || batchFold[g.label] === true);
+    fill(first);
     return card;
   }
 
@@ -1766,7 +1768,10 @@ function stockAppStart(root, config, idToken, mode) {
     renderSelect();
   }
 
-  /** まとめての画面で、その品目の数の欄に移る。区分が閉じていれば開き（覚える状態も開く）、探す文字で隠れていれば探す欄を空にする。 */
+  /**
+   * まとめての画面で、その品目の数の欄に移る。区分が閉じていれば開き（覚える状態も開く）、探す文字で隠れていれば探す欄を空にする。
+   * 探す文字に当たる品目で、その区分が絞った中で閉じていれば、絞った中でも開く（探す欄はそのまま）。
+   */
   function focusBatchItem(item) {
     if (bv !== null) {
       var label = null;
@@ -1780,6 +1785,9 @@ function stockAppStart(root, config, idToken, mode) {
         if (key !== '' && stockSearchKey(item).indexOf(key) < 0) {
           search.batch = '';
           bv.input.value = '';
+          redo = true;
+        } else if (key !== '' && batchFilterFold.closed[label] === true) {
+          delete batchFilterFold.closed[label];
           redo = true;
         }
         if (redo) renderBatchBody();
@@ -2730,7 +2738,7 @@ function stockAppStart(root, config, idToken, mode) {
     if (orders >= 1) root.appendChild(el('p', 'status error', T.orderCountHead + orders + T.orderCountTail));
     else root.appendChild(el('p', 'note', T.orderCountHead + T.orderCountNone));
     lv = { data: data, text: '', order: false, kinds: Object.create(null), groups: Object.create(null), band: null, filterAll: null, filterOrder: null,
-      allOpen: null, allClose: null, body: [], anchor: null };
+      body: [], anchor: null, fkey: '', fkinds: Object.create(null), fgroups: Object.create(null) };
     root.appendChild(listBand());
     var row = el('div', 'action-row result-actions');
     row.appendChild(button(T.openRecord, 'again', function () {
@@ -2742,7 +2750,7 @@ function stockAppStart(root, config, idToken, mode) {
     renderListBody();
   }
 
-  /** 在庫を見るの上の帯（探す欄・すべて／要発注だけ・全部開く／全部閉じる）。 */
+  /** 在庫を見るの上の帯（探す欄・すべて／要発注だけ）。 */
   function listBand() {
     var b = stickyBand('list');
     lv.band = b;
@@ -2753,23 +2761,8 @@ function stockAppStart(root, config, idToken, mode) {
     var r = el('div', 'action-row');
     lv.filterAll = bandButton(choiceButton(T.filterAll, true, function () { setListOrder(false); }));
     lv.filterOrder = bandButton(choiceButton(T.filterOrder, false, function () { setListOrder(true); }));
-    lv.allOpen = bandButton(button(T.openAll, 'again', function () {
-      lv.data.kinds.forEach(function (k) {
-        lv.kinds[k.kind] = true;
-        k.groups.forEach(function (g) { lv.groups[listGroupKey(k.kind, g.label)] = true; });
-      });
-      renderListBody();
-    }));
-    lv.allClose = bandButton(button(T.closeAll, 'again', function () {
-      lv.kinds = Object.create(null);
-      lv.groups = Object.create(null);
-      renderListBody();
-      keepBelowBand(lv.body[0], lv.band);
-    }));
     r.appendChild(lv.filterAll);
     r.appendChild(lv.filterOrder);
-    r.appendChild(lv.allOpen);
-    r.appendChild(lv.allClose);
     b.appendChild(r);
     return b;
   }
@@ -2788,12 +2781,21 @@ function stockAppStart(root, config, idToken, mode) {
     return JSON.stringify([kind, label]);
   }
 
-  /** 在庫を見るの帯の下の本文（種類の枠）だけを作り直す。探している間・要発注だけの間は、残った枠を開いて見せる。 */
+  /**
+   * 在庫を見るの帯の下の本文（種類の枠）だけを作り直す。探している間・要発注だけの間は、残った枠を絞った中の開け閉めで出す
+   * （絞り方（要発注だけか・探す文字のキー）が前と違えば全部開いた形に戻す）。
+   */
   function renderListBody() {
     lv.body.forEach(function (x) { if (x.parentNode === root) root.removeChild(x); });
     lv.body = [];
     var hasKey = stockSearchKey(lv.text) !== '';
     var locked = hasKey || lv.order;
+    var fkey = locked ? JSON.stringify([lv.order, stockSearchKey(lv.text)]) : '';
+    if (fkey !== lv.fkey) {
+      lv.fkey = fkey;
+      lv.fkinds = Object.create(null);
+      lv.fgroups = Object.create(null);
+    }
     var kinds = stockFilterKinds(lv.data.kinds, lv.text, lv.order);
     var add = function (x) {
       root.insertBefore(x, lv.anchor);
@@ -2801,8 +2803,6 @@ function stockAppStart(root, config, idToken, mode) {
     };
     if (locked && kinds.length === 0) add(el('p', 'note', hasKey ? T.searchNone : T.orderOnlyNone));
     kinds.forEach(function (k) { add(listKindCard(k, locked)); });
-    lv.allOpen.disabled = locked;
-    lv.allClose.disabled = locked;
   }
 
   function orderCount(items) {
@@ -2814,7 +2814,7 @@ function stockAppStart(root, config, idToken, mode) {
     return n >= 1 ? el('p', 'status error', T.orderSomeHead + n + T.orderSomeTail) : null;
   }
 
-  /** 在庫を見るの種類の枠。 */
+  /** 在庫を見るの種類の枠。locked（探している間・要発注だけの間）は絞った中の開け閉め（lv.fkinds）を使い、lv.kinds は変えない。k は絞った写し。 */
   function listKindCard(k, locked) {
     var card = el('div', 'card');
     var count = 0;
@@ -2837,21 +2837,32 @@ function stockAppStart(root, config, idToken, mode) {
       }
       k.groups.forEach(function (g) { card.appendChild(listGroupBox(k, g, locked)); });
     };
-    var b = foldButton(k.kind, lv.kinds[k.kind] === true, locked, true, function () {
-      var open = lv.kinds[k.kind] !== true;
-      if (open) lv.kinds[k.kind] = true;
-      else delete lv.kinds[k.kind];
+    var first = locked ? lv.fkinds[k.kind] !== true : lv.kinds[k.kind] === true;
+    var b = foldButton(k.kind, first, true, function () {
+      var open;
+      if (locked) {
+        open = lv.fkinds[k.kind] === true;
+        if (open) delete lv.fkinds[k.kind];
+        else lv.fkinds[k.kind] = true;
+      } else {
+        open = lv.kinds[k.kind] !== true;
+        if (open) lv.kinds[k.kind] = true;
+        else delete lv.kinds[k.kind];
+      }
       setFold(b, k.kind, open);
       fill(open);
       if (!open) keepBelowBand(b, lv.band);
     });
     h.appendChild(b);
     card.appendChild(h);
-    fill(locked || lv.kinds[k.kind] === true);
+    fill(first);
     return card;
   }
 
-  /** 在庫を見るの区分のかたまり（見出しは開け閉め。閉じているときは要発注あり（n品目））。種類より一段下げ（16px）、左に縦の線。見出しに ■ は付けない。 */
+  /**
+   * 在庫を見るの区分のかたまり（見出しは開け閉め。閉じているときは要発注あり（n品目））。種類より一段下げ（16px）、左に縦の線。見出しに ■ は付けない。
+   * locked の間は絞った中の開け閉め（lv.fgroups）を使い、lv.groups は変えない。
+   */
   function listGroupBox(k, g, locked) {
     var box = el('div');
     box.style.paddingLeft = '12px';
@@ -2870,16 +2881,24 @@ function stockAppStart(root, config, idToken, mode) {
         box.appendChild(itemRow(e, k.unit, warn));
       });
     };
-    var b = foldButton(name, lv.groups[key] === true, locked, false, function () {
-      var open = lv.groups[key] !== true;
-      if (open) lv.groups[key] = true;
-      else delete lv.groups[key];
+    var first = locked ? lv.fgroups[key] !== true : lv.groups[key] === true;
+    var b = foldButton(name, first, false, function () {
+      var open;
+      if (locked) {
+        open = lv.fgroups[key] === true;
+        if (open) delete lv.fgroups[key];
+        else lv.fgroups[key] = true;
+      } else {
+        open = lv.groups[key] !== true;
+        if (open) lv.groups[key] = true;
+        else delete lv.groups[key];
+      }
       setFold(b, name, open);
       fill(open);
       if (!open) keepBelowBand(b, lv.band);
     });
     box.appendChild(b);
-    fill(locked || lv.groups[key] === true);
+    fill(first);
     return box;
   }
 
